@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Admin\OrganizationSettingsController;
 use App\Http\Controllers\Admin\OrganizationUsersController;
+use App\Http\Controllers\ManageController;
 use App\Http\Controllers\OrganizationSwitchController;
 use App\Http\Middleware\EnsureOrganizationAdmin;
 use Illuminate\Support\Facades\Route;
@@ -13,7 +14,12 @@ Route::inertia('/', 'welcome', [
 
 Route::middleware(['auth', 'verified'])->group(function () {
     Route::inertia('dashboard', 'dashboard')->name('dashboard');
-    Route::inertia('manage', 'manage')->name('manage');
+
+    Route::get('manage', [ManageController::class, 'index'])->name('manage');
+    Route::post('manage/folders', [ManageController::class, 'storeFolder'])->name('manage.folders.store');
+    Route::post('manage/files', [ManageController::class, 'storeFile'])->name('manage.files.store');
+    Route::post('manage/files/url', [ManageController::class, 'storeFromUrl'])->name('manage.files.url');
+
     Route::inertia('status', 'status')->name('status');
 
     Route::put('organizations/{organization}/switch', OrganizationSwitchController::class)
