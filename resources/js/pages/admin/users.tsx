@@ -1,15 +1,43 @@
 import { Head, setLayoutProps } from '@inertiajs/react';
+import { MoreHorizontal } from 'lucide-react';
 import Heading from '@/components/heading';
-import { PlaceholderPattern } from '@/components/ui/placeholder-pattern';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuSeparator,
+    DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import {
+    Table,
+    TableBody,
+    TableCell,
+    TableHead,
+    TableHeader,
+    TableRow,
+} from '@/components/ui/table';
 import { index as indexOrgUsers } from '@/routes/admin/organizations/users';
+
+type User = {
+    id: number;
+    name: string;
+    email: string;
+    avatar?: string;
+    role: string;
+    created_at: string;
+};
 
 export default function OrganizationUsers({
     organization,
+    users,
 }: {
     organization: {
         id: number;
         name: string;
     };
+    users: User[];
 }) {
     setLayoutProps({
         breadcrumbs: [
@@ -33,8 +61,77 @@ export default function OrganizationUsers({
                     description={`Manage users in ${organization.name}`}
                 />
 
-                <div className="relative min-h-[40vh] flex-1 overflow-hidden rounded-xl border border-sidebar-border/70 dark:border-sidebar-border">
-                    <PlaceholderPattern className="absolute inset-0 size-full stroke-neutral-900/20 dark:stroke-neutral-100/20" />
+                <div className="rounded-lg border">
+                    <Table>
+                        <TableHeader>
+                            <TableRow>
+                                <TableHead>Name</TableHead>
+                                <TableHead>Email</TableHead>
+                                <TableHead>Role</TableHead>
+                                <TableHead className="w-10">
+                                    <span className="sr-only">Actions</span>
+                                </TableHead>
+                            </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                            {users.map((user) => (
+                                <TableRow key={user.id}>
+                                    <TableCell className="font-medium">
+                                        {user.name}
+                                    </TableCell>
+                                    <TableCell className="text-muted-foreground">
+                                        {user.email}
+                                    </TableCell>
+                                    <TableCell>
+                                        <Badge
+                                            variant="secondary"
+                                            className="capitalize"
+                                        >
+                                            {user.role}
+                                        </Badge>
+                                    </TableCell>
+                                    <TableCell>
+                                        <DropdownMenu>
+                                            <DropdownMenuTrigger asChild>
+                                                <Button
+                                                    variant="ghost"
+                                                    className="size-8 p-0"
+                                                >
+                                                    <MoreHorizontal className="size-4" />
+                                                    <span className="sr-only">
+                                                        Open menu
+                                                    </span>
+                                                </Button>
+                                            </DropdownMenuTrigger>
+                                            <DropdownMenuContent align="end">
+                                                <DropdownMenuItem>
+                                                    Edit Profile
+                                                </DropdownMenuItem>
+                                                <DropdownMenuItem>
+                                                    Edit Password
+                                                </DropdownMenuItem>
+                                                <DropdownMenuSeparator />
+                                                <DropdownMenuItem variant="destructive">
+                                                    Delete User
+                                                </DropdownMenuItem>
+                                            </DropdownMenuContent>
+                                        </DropdownMenu>
+                                    </TableCell>
+                                </TableRow>
+                            ))}
+
+                            {users.length === 0 && (
+                                <TableRow>
+                                    <TableCell
+                                        colSpan={4}
+                                        className="h-24 text-center"
+                                    >
+                                        No users found.
+                                    </TableCell>
+                                </TableRow>
+                            )}
+                        </TableBody>
+                    </Table>
                 </div>
             </div>
         </>

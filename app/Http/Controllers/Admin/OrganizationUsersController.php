@@ -18,10 +18,11 @@ class OrganizationUsersController extends Controller
                 'id' => $organization->id,
                 'name' => $organization->name,
             ],
-            'users' => $organization->users()->get()->map(fn ($user) => [
+            'users' => $organization->users()->orderBy('name')->get()->map(fn ($user) => [
                 'id' => $user->id,
                 'name' => $user->name,
                 'email' => $user->email,
+                'avatar' => $user->avatar,
                 'role' => $user->pivot->role,
                 'created_at' => $user->created_at->toIso8601String(),
             ]),
