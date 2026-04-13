@@ -1,6 +1,8 @@
 import {
+    Activity,
     BookOpen,
     FolderGit2,
+    FolderKanban,
     LayoutGrid,
     Settings,
     Users,
@@ -18,7 +20,7 @@ import {
     SidebarMenu,
     SidebarMenuItem,
 } from '@/components/ui/sidebar';
-import { dashboard } from '@/routes';
+import { dashboard, manage, status } from '@/routes';
 import { edit as editOrgSettings } from '@/routes/admin/organizations/settings';
 import { index as indexOrgUsers } from '@/routes/admin/organizations/users';
 import type { NavItem, SharedData } from '@/types';
@@ -28,6 +30,16 @@ const mainNavItems: NavItem[] = [
         title: 'Dashboard',
         href: dashboard(),
         icon: LayoutGrid,
+    },
+    {
+        title: 'Manage',
+        href: manage(),
+        icon: FolderKanban,
+    },
+    {
+        title: 'Status',
+        href: status(),
+        icon: Activity,
     },
 ];
 

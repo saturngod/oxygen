@@ -36,7 +36,7 @@ export default function OrganizationUsers({
     users,
 }: {
     organization: {
-        id: number;
+        id: string;
         name: string;
     };
     users: User[];
@@ -66,7 +66,7 @@ export default function OrganizationUsers({
 
             <div className="flex h-full flex-1 flex-col gap-4 overflow-x-auto rounded-xl p-4">
                 <Heading
-                    variant="small"
+                    variant="page"
                     title="Users"
                     description={`Manage users in ${organization.name}`}
                 />

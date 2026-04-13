@@ -13,6 +13,8 @@ Route::inertia('/', 'welcome', [
 
 Route::middleware(['auth', 'verified'])->group(function () {
     Route::inertia('dashboard', 'dashboard')->name('dashboard');
+    Route::inertia('manage', 'manage')->name('manage');
+    Route::inertia('status', 'status')->name('status');
 
     Route::put('organizations/{organization}/switch', OrganizationSwitchController::class)
         ->name('organizations.switch');

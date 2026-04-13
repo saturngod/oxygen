@@ -1,3 +1,17 @@
+type HeadingVariant = 'default' | 'small' | 'page';
+
+const titleClasses: Record<HeadingVariant, string> = {
+    default: 'text-xl font-semibold tracking-tight',
+    small: 'mb-0.5 text-base font-medium',
+    page: 'text-2xl font-semibold',
+};
+
+const headerClasses: Record<HeadingVariant, string> = {
+    default: 'mb-8 space-y-0.5',
+    small: '',
+    page: 'border-b pb-4',
+};
+
 export default function Heading({
     title,
     description,
@@ -5,19 +19,11 @@ export default function Heading({
 }: {
     title: string;
     description?: string;
-    variant?: 'default' | 'small';
+    variant?: HeadingVariant;
 }) {
     return (
-        <header className={variant === 'small' ? '' : 'mb-8 space-y-0.5'}>
-            <h2
-                className={
-                    variant === 'small'
-                        ? 'mb-0.5 text-base font-medium'
-                        : 'text-xl font-semibold tracking-tight'
-                }
-            >
-                {title}
-            </h2>
+        <header className={headerClasses[variant]}>
+            <h2 className={titleClasses[variant]}>{title}</h2>
             {description && (
                 <p className="text-sm text-muted-foreground">{description}</p>
             )}

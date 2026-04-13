@@ -1,7 +1,7 @@
 export type OrganizationRole = 'admin' | 'operator';
 
 export type CurrentOrganization = {
-    id: number;
+    id: string;
     name: string;
     slug: string;
     image_url: string;
@@ -22,7 +22,7 @@ export type User = {
 };
 
 export type OrganizationMembership = {
-    id: number;
+    id: string;
     name: string;
     slug: string;
     role: OrganizationRole;

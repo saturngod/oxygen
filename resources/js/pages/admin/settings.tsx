@@ -12,7 +12,7 @@ export default function OrganizationSettings({
     organization,
 }: {
     organization: {
-        id: number;
+        id: string;
         name: string;
         image_url: string;
         contact_email: string | null;
@@ -39,7 +39,7 @@ export default function OrganizationSettings({
 
             <div className="flex h-full flex-1 flex-col gap-4 overflow-x-auto rounded-xl p-4">
                 <Heading
-                    variant="small"
+                    variant="page"
                     title="Organization information"
                     description="Update your organization's name, logo, and contact details"
                 />
