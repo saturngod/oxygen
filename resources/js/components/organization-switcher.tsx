@@ -51,7 +51,7 @@ export function OrganizationSwitcher({ className }: { className?: string }) {
                     <span className="flex-1 truncate text-left text-sm font-medium">
                         {displayName}
                     </span>
-                    <ChevronsUpDown className="ml-auto h-4 w-4 shrink-0 text-muted-foreground" />
+                    <ChevronsUpDown className="ml-auto h-4 w-4 shrink-0 text-white" />
                 </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="w-60" sideOffset={8}>
