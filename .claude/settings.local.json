@@ -6,7 +6,9 @@
       "Bash(ALLOW_REGISTER=false php artisan route:list --path=register)",
       "Bash(vendor/bin/pint --dirty --format agent)",
       "Bash(git stash:*)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(composer show:*)",
+      "Bash(composer require:*)"
     ]
   },
   "enableAllProjectMcpServers": true,

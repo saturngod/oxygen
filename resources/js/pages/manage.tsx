@@ -106,6 +106,23 @@ function formatSize(bytes: number): string {
     return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
 }
 
+const CHUNK_SIZE = 5 * 1024 * 1024;
+
+function xsrfTokenFromCookie(): string {
+    const match = document.cookie
+        .split('; ')
+        .find((row) => row.startsWith('XSRF-TOKEN='));
+    return match ? decodeURIComponent(match.split('=')[1]) : '';
+}
+
+type UploadState =
+    | 'idle'
+    | 'uploading'
+    | 'paused'
+    | 'error'
+    | 'finalizing'
+    | 'done';
+
 export default function Manage({ currentFolder, folders, files }: Props) {
     const [folderDialogOpen, setFolderDialogOpen] = useState(false);
     const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
@@ -115,11 +132,18 @@ export default function Manage({ currentFolder, folders, files }: Props) {
     const [selectedFile, setSelectedFile] = useState<File | null>(null);
     const [isDragging, setIsDragging] = useState(false);
     const [uploadTitle, setUploadTitle] = useState('');
-    const [uploading, setUploading] = useState(false);
     const [uploadErrors, setUploadErrors] = useState<Record<string, string>>(
         {},
     );
     const fileInputRef = useRef<HTMLInputElement>(null);
+
+    const [uploadState, setUploadState] = useState<UploadState>('idle');
+    const [uploadProgress, setUploadProgress] = useState(0);
+    const [uploadError, setUploadError] = useState<string | null>(null);
+    const uploadIdRef = useRef<string | null>(null);
+    const nextChunkRef = useRef(0);
+    const totalChunksRef = useRef(0);
+    const abortRef = useRef(false);
 
     setLayoutProps({
         breadcrumbs: currentFolder
@@ -158,9 +182,143 @@ export default function Manage({ currentFolder, folders, files }: Props) {
         setUploadTitle('');
         setUploadErrors({});
         setUploadTab('file');
+        setUploadState('idle');
+        setUploadProgress(0);
+        setUploadError(null);
+        uploadIdRef.current = null;
+        nextChunkRef.current = 0;
+        totalChunksRef.current = 0;
+        abortRef.current = false;
         if (fileInputRef.current) {
             fileInputRef.current.value = '';
         }
+    };
+
+    const cancelChunkUpload = async () => {
+        const id = uploadIdRef.current;
+        if (!id) {
+            return;
+        }
+        try {
+            await fetch(`/manage/files/chunk/${id}`, {
+                method: 'DELETE',
+                credentials: 'same-origin',
+                headers: {
+                    Accept: 'application/json',
+                    'X-XSRF-TOKEN': xsrfTokenFromCookie(),
+                },
+            });
+        } catch {
+            /* ignore */
+        }
+    };
+
+    const runChunkLoop = async () => {
+        if (!selectedFile || !uploadIdRef.current) {
+            return;
+        }
+        setUploadState('uploading');
+        setUploadError(null);
+        abortRef.current = false;
+        const total = totalChunksRef.current;
+
+        while (nextChunkRef.current < total) {
+            if (abortRef.current) {
+                return;
+            }
+            const index = nextChunkRef.current;
+            const start = index * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, selectedFile.size);
+            const slice = selectedFile.slice(start, end);
+
+            const formData = new FormData();
+            formData.append('upload_id', uploadIdRef.current);
+            formData.append('chunk_index', String(index));
+            formData.append('total_chunks', String(total));
+            formData.append('chunk', slice, `${index}`);
+
+            try {
+                const response = await fetch('/manage/files/chunk', {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    headers: {
+                        Accept: 'application/json',
+                        'X-XSRF-TOKEN': xsrfTokenFromCookie(),
+                    },
+                    body: formData,
+                });
+                if (!response.ok) {
+                    throw new Error(
+                        `Chunk ${index} failed (${response.status})`,
+                    );
+                }
+            } catch (err) {
+                setUploadState('error');
+                setUploadError(
+                    err instanceof Error ? err.message : 'Upload failed.',
+                );
+                return;
+            }
+
+            nextChunkRef.current = index + 1;
+            setUploadProgress(
+                Math.round((nextChunkRef.current / total) * 100),
+            );
+        }
+
+        setUploadState('finalizing');
+        const finalizeData = new FormData();
+        finalizeData.append('upload_id', uploadIdRef.current);
+        finalizeData.append('total_chunks', String(total));
+        finalizeData.append('file_name', selectedFile.name);
+        finalizeData.append('title', uploadTitle);
+        finalizeData.append('tags', JSON.stringify(tags));
+        if (currentFolder) {
+            finalizeData.append('folder_id', currentFolder.id);
+        }
+
+        router.post(
+            '/manage/files/chunk/finalize',
+            finalizeData as unknown as Parameters<typeof router.post>[1],
+            {
+                forceFormData: true,
+                preserveScroll: true,
+                onError: (errors) => {
+                    setUploadState('error');
+                    setUploadErrors(errors as Record<string, string>);
+                    setUploadError('Finalize failed.');
+                },
+                onSuccess: () => {
+                    setUploadState('done');
+                    setUploadDialogOpen(false);
+                    resetUploadForm();
+                },
+            },
+        );
+    };
+
+    const startChunkedUpload = () => {
+        if (!selectedFile) {
+            setUploadErrors({ file: 'Please choose a video file.' });
+            return;
+        }
+        if (!uploadTitle.trim()) {
+            setUploadErrors({ title: 'Title is required.' });
+            return;
+        }
+        uploadIdRef.current = crypto.randomUUID();
+        nextChunkRef.current = 0;
+        totalChunksRef.current = Math.max(
+            1,
+            Math.ceil(selectedFile.size / CHUNK_SIZE),
+        );
+        setUploadProgress(0);
+        setUploadErrors({});
+        void runChunkLoop();
+    };
+
+    const resumeChunkedUpload = () => {
+        void runChunkLoop();
     };
 
     const pickFile = (file: File | null) => {
@@ -197,30 +355,7 @@ export default function Manage({ currentFolder, folders, files }: Props) {
 
     const handleUploadFileSubmit = (event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
-        if (!selectedFile) {
-            setUploadErrors({ file: 'Please choose a video file.' });
-            return;
-        }
-        const formData = new FormData();
-        formData.append('title', uploadTitle);
-        formData.append('file', selectedFile);
-        formData.append('tags', JSON.stringify(tags));
-        if (currentFolder) {
-            formData.append('folder_id', currentFolder.id);
-        }
-        setUploading(true);
-        router.post(ManageController.storeFile.url(), formData, {
-            forceFormData: true,
-            preserveScroll: true,
-            onError: (errors) => {
-                setUploadErrors(errors as Record<string, string>);
-            },
-            onSuccess: () => {
-                setUploadDialogOpen(false);
-                resetUploadForm();
-            },
-            onFinish: () => setUploading(false),
-        });
+        startChunkedUpload();
     };
 
     return (
@@ -516,20 +651,106 @@ export default function Manage({ currentFolder, folders, files }: Props) {
                                             </div>
                                         </div>
 
+                                        {(uploadState === 'uploading' ||
+                                            uploadState === 'finalizing' ||
+                                            uploadState === 'error') && (
+                                            <div className="space-y-2 rounded-md border bg-muted/40 p-3">
+                                                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                                                    <span>
+                                                        {uploadState ===
+                                                        'finalizing'
+                                                            ? 'Finalizing…'
+                                                            : uploadState ===
+                                                                'error'
+                                                              ? 'Upload paused'
+                                                              : `Uploading chunk ${nextChunkRef.current + 1}/${totalChunksRef.current}`}
+                                                    </span>
+                                                    <span className="font-medium">
+                                                        {uploadProgress}%
+                                                    </span>
+                                                </div>
+                                                <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                                                    <div
+                                                        className={`h-full transition-all ${
+                                                            uploadState ===
+                                                            'error'
+                                                                ? 'bg-red-500'
+                                                                : 'bg-primary'
+                                                        }`}
+                                                        style={{
+                                                            width: `${uploadProgress}%`,
+                                                        }}
+                                                    />
+                                                </div>
+                                                {uploadError && (
+                                                    <p className="text-xs text-red-600">
+                                                        {uploadError}
+                                                    </p>
+                                                )}
+                                            </div>
+                                        )}
+
                                         <DialogFooter className="gap-2">
-                                            <DialogClose asChild>
-                                                <Button variant="secondary">
-                                                    Cancel
-                                                </Button>
-                                            </DialogClose>
-                                            <Button
-                                                type="submit"
-                                                disabled={uploading}
-                                            >
-                                                {uploading
-                                                    ? 'Uploading…'
-                                                    : 'Upload'}
-                                            </Button>
+                                            {uploadState === 'error' ? (
+                                                <>
+                                                    <Button
+                                                        type="button"
+                                                        variant="secondary"
+                                                        onClick={async () => {
+                                                            abortRef.current =
+                                                                true;
+                                                            await cancelChunkUpload();
+                                                            setUploadDialogOpen(
+                                                                false,
+                                                            );
+                                                            resetUploadForm();
+                                                        }}
+                                                    >
+                                                        Cancel
+                                                    </Button>
+                                                    <Button
+                                                        type="button"
+                                                        onClick={
+                                                            resumeChunkedUpload
+                                                        }
+                                                    >
+                                                        Resume upload
+                                                    </Button>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <DialogClose asChild>
+                                                        <Button
+                                                            variant="secondary"
+                                                            disabled={
+                                                                uploadState ===
+                                                                    'uploading' ||
+                                                                uploadState ===
+                                                                    'finalizing'
+                                                            }
+                                                        >
+                                                            Cancel
+                                                        </Button>
+                                                    </DialogClose>
+                                                    <Button
+                                                        type="submit"
+                                                        disabled={
+                                                            uploadState ===
+                                                                'uploading' ||
+                                                            uploadState ===
+                                                                'finalizing'
+                                                        }
+                                                    >
+                                                        {uploadState ===
+                                                        'uploading'
+                                                            ? 'Uploading…'
+                                                            : uploadState ===
+                                                                'finalizing'
+                                                              ? 'Finalizing…'
+                                                              : 'Upload'}
+                                                    </Button>
+                                                </>
+                                            )}
                                         </DialogFooter>
                                     </form>
                                 )}

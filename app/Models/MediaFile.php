@@ -40,6 +40,10 @@ class MediaFile extends Model
 
     public function fileUrl(): string
     {
-        return Storage::disk('public')->url($this->file_path);
+        if ($this->file_path === null) {
+            return '';
+        }
+
+        return Storage::disk('s3')->url($this->file_path);
     }
 }

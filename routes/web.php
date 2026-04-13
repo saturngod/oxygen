@@ -19,6 +19,9 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::post('manage/folders', [ManageController::class, 'storeFolder'])->name('manage.folders.store');
     Route::post('manage/files', [ManageController::class, 'storeFile'])->name('manage.files.store');
     Route::post('manage/files/url', [ManageController::class, 'storeFromUrl'])->name('manage.files.url');
+    Route::post('manage/files/chunk', [ManageController::class, 'uploadChunk'])->name('manage.files.chunk');
+    Route::post('manage/files/chunk/finalize', [ManageController::class, 'finalizeChunkUpload'])->name('manage.files.chunk.finalize');
+    Route::delete('manage/files/chunk/{uploadId}', [ManageController::class, 'cancelChunkUpload'])->name('manage.files.chunk.cancel');
 
     Route::inertia('status', 'status')->name('status');
 
