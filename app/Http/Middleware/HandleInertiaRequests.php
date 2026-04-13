@@ -55,6 +55,7 @@ class HandleInertiaRequests extends Middleware
                     'id' => $current->id,
                     'name' => $current->name,
                     'slug' => $current->slug,
+                    'image_url' => $current->imageUrl(),
                 ],
             ]);
 
@@ -63,6 +64,7 @@ class HandleInertiaRequests extends Middleware
                 'name' => $org->name,
                 'slug' => $org->slug,
                 'role' => $org->pivot->role,
+                'image_url' => $org->imageUrl(),
             ])->all();
         }
 

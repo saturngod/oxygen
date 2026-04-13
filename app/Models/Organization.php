@@ -8,8 +8,9 @@ use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Support\Facades\Storage;
 
-#[Fillable(['name', 'slug'])]
+#[Fillable(['name', 'slug', 'image', 'contact_email', 'phone', 'address'])]
 class Organization extends Model
 {
     /** @use HasFactory<OrganizationFactory> */
@@ -28,5 +29,12 @@ class Organization extends Model
             ->wherePivot('user_id', $user->getKey())
             ->wherePivot('role', $role->value)
             ->exists();
+    }
+
+    public function imageUrl(): string
+    {
+        return $this->image
+            ? Storage::disk('public')->url($this->image)
+            : '';
     }
 }

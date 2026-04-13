@@ -23,6 +23,9 @@ class OrganizationFactory extends Factory
         return [
             'name' => $name,
             'slug' => Str::slug($name).'-'.Str::lower(Str::random(6)),
+            'contact_email' => fake()->optional()->companyEmail(),
+            'phone' => fake()->optional()->phoneNumber(),
+            'address' => fake()->optional()->streetAddress(),
         ];
     }
 }

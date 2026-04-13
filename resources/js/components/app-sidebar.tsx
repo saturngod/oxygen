@@ -1,4 +1,11 @@
-import { BookOpen, FolderGit2, LayoutGrid } from 'lucide-react';
+import {
+    BookOpen,
+    FolderGit2,
+    LayoutGrid,
+    Settings,
+    Users,
+} from 'lucide-react';
+import { usePage } from '@inertiajs/react';
 import { NavFooter } from '@/components/nav-footer';
 import { NavMain } from '@/components/nav-main';
 import { NavUser } from '@/components/nav-user';
@@ -12,7 +19,9 @@ import {
     SidebarMenuItem,
 } from '@/components/ui/sidebar';
 import { dashboard } from '@/routes';
-import type { NavItem } from '@/types';
+import { edit as editOrgSettings } from '@/routes/admin/organizations/settings';
+import { index as indexOrgUsers } from '@/routes/admin/organizations/users';
+import type { NavItem, SharedData } from '@/types';
 
 const mainNavItems: NavItem[] = [
     {
@@ -36,6 +45,26 @@ const footerNavItems: NavItem[] = [
 ];
 
 export function AppSidebar() {
+    const { auth } = usePage<SharedData>().props;
+    const isAdmin = auth.user.current_role === 'admin';
+    const orgId = auth.user.current_organization?.id;
+
+    const adminNavItems: NavItem[] =
+        isAdmin && orgId
+            ? [
+                  {
+                      title: 'Users',
+                      href: indexOrgUsers({ organization: orgId }),
+                      icon: Users,
+                  },
+                  {
+                      title: 'Settings',
+                      href: editOrgSettings({ organization: orgId }),
+                      icon: Settings,
+                  },
+              ]
+            : [];
+
     return (
         <Sidebar collapsible="icon" variant="inset">
             <SidebarHeader>
@@ -48,6 +77,9 @@ export function AppSidebar() {
 
             <SidebarContent>
                 <NavMain title="Platform" items={mainNavItems} />
+                {isAdmin && adminNavItems.length > 0 && (
+                    <NavMain title="Admin" items={adminNavItems} />
+                )}
             </SidebarContent>
 
             <SidebarFooter>

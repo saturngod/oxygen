@@ -4,6 +4,7 @@ export type CurrentOrganization = {
     id: number;
     name: string;
     slug: string;
+    image_url: string;
 };
 
 export type User = {
@@ -25,6 +26,7 @@ export type OrganizationMembership = {
     name: string;
     slug: string;
     role: OrganizationRole;
+    image_url: string;
 };
 
 export type Auth = {
