@@ -1,8 +1,10 @@
 import { Head, setLayoutProps } from '@inertiajs/react';
-import { MoreHorizontal } from 'lucide-react';
+import { MoreHorizontal, Plus } from 'lucide-react';
+import { useState } from 'react';
 import Heading from '@/components/heading';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { ControlFilter } from '@/components/control-filter';
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -39,6 +41,8 @@ export default function OrganizationUsers({
     };
     users: User[];
 }) {
+    const [search, setSearch] = useState('');
+
     setLayoutProps({
         breadcrumbs: [
             {
@@ -47,6 +51,12 @@ export default function OrganizationUsers({
             },
         ],
     });
+
+    const filteredUsers = users.filter(
+        (user) =>
+            user.name.toLowerCase().includes(search.toLowerCase()) ||
+            user.email.toLowerCase().includes(search.toLowerCase()),
+    );
 
     return (
         <>
@@ -59,6 +69,18 @@ export default function OrganizationUsers({
                     variant="small"
                     title="Users"
                     description={`Manage users in ${organization.name}`}
+                />
+
+                <ControlFilter
+                    searchValue={search}
+                    onSearchChange={setSearch}
+                    searchPlaceholder="Search users..."
+                    actions={[
+                        {
+                            label: 'Add User',
+                            icon: <Plus className="size-3.5" />,
+                        },
+                    ]}
                 />
 
                 <div className="rounded-lg border">
@@ -74,7 +96,7 @@ export default function OrganizationUsers({
                             </TableRow>
                         </TableHeader>
                         <TableBody>
-                            {users.map((user) => (
+                            {filteredUsers.map((user) => (
                                 <TableRow key={user.id}>
                                     <TableCell className="font-medium">
                                         {user.name}
@@ -120,7 +142,7 @@ export default function OrganizationUsers({
                                 </TableRow>
                             ))}
 
-                            {users.length === 0 && (
+                            {filteredUsers.length === 0 && (
                                 <TableRow>
                                     <TableCell
                                         colSpan={4}
