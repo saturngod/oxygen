@@ -209,3 +209,35 @@ Use Wayfinder to generate TypeScript functions for Laravel routes. Import from `
 - IMPORTANT: Activate `inertia-react-development` when working with Inertia React client-side patterns.
 
 </laravel-boost-guidelines>
+
+## Organizations & Multi-Tenancy
+
+This app is multi-tenant at the organization level. A user may belong to many organizations; an organization has many users. The pivot `organization_user` carries a `role` column backed by `App\Enums\OrganizationRole` (`admin`, `operator`). At registration (`App\Actions\Fortify\CreateNewUser`), a new `Organization` is created inside a DB transaction and the registering user is attached as `admin`.
+
+### Active organization (session-scoped)
+
+The "current" organization for a request is resolved in `App\Http\Middleware\HandleInertiaRequests::share()`:
+
+1. Read `current_organization_id` from the session.
+2. Find that org in the user's memberships; if missing, fall back to the user's first membership (alphabetical).
+3. If the session value was empty or stale, it is rewritten to the resolved org's id.
+
+The middleware shares these Inertia props:
+
+- `auth.user.current_role` — pivot role string for the active org (`admin` | `operator` | `null`).
+- `auth.user.current_organization` — `{ id, name, slug } | null`.
+- `auth.organizations` — full list of the user's memberships with `{ id, name, slug, role }`, used by the switcher.
+
+When adding new server-side code that needs the active org, read `session('current_organization_id')` (do NOT re-derive from "first membership" — that diverges from what the UI shows). If you need it in many places, consider a dedicated resolver service rather than duplicating the fallback logic.
+
+### Switching organizations
+
+- Route: `PUT /organizations/{organization}/switch` → `organizations.switch` → `App\Http\Controllers\OrganizationSwitchController`.
+- The controller authorizes by checking the user is a member of the target org (403 otherwise), writes `current_organization_id` to the session, and redirects back.
+- Frontend entry point: `resources/js/components/organization-switcher.tsx` (rendered in `app-header.tsx` in place of the app logo). It uses the Wayfinder-generated `organizations.switch()` route and calls `router.put(..., {}, { preserveScroll: true })`.
+- Any new feature scoped to an organization should filter by the active org id from the session — never trust a client-sent organization id without re-authorizing membership.
+
+### Registration gate
+
+- Registration is toggleable via `ALLOW_REGISTER` in `.env`. This is evaluated in `config/fortify.php` (safe under `config:cache` because it's inside a config file), conditionally including `Features::registration()`. `routes/web.php` exposes `canRegister` to the welcome page via `Features::enabled(Features::registration())`, so the UI auto-hides the link when disabled.
+

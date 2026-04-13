@@ -20,8 +20,16 @@ export type User = {
     [key: string]: unknown;
 };
 
+export type OrganizationMembership = {
+    id: number;
+    name: string;
+    slug: string;
+    role: OrganizationRole;
+};
+
 export type Auth = {
     user: User;
+    organizations: OrganizationMembership[];
 };
 
 export type TwoFactorSetupData = {

@@ -37,18 +37,33 @@ class HandleInertiaRequests extends Middleware
     {
         $user = $request->user();
         $userPayload = null;
+        $organizations = [];
 
         if ($user !== null) {
-            $membership = $user->organizations()->first();
+            $memberships = $user->organizations()->orderBy('name')->get();
+
+            $currentId = $request->session()->get('current_organization_id');
+            $current = $memberships->firstWhere('id', $currentId) ?? $memberships->first();
+
+            if ($current !== null && $current->getKey() !== $currentId) {
+                $request->session()->put('current_organization_id', $current->getKey());
+            }
 
             $userPayload = array_merge($user->toArray(), [
-                'current_role' => $membership?->pivot->role,
-                'current_organization' => $membership === null ? null : [
-                    'id' => $membership->id,
-                    'name' => $membership->name,
-                    'slug' => $membership->slug,
+                'current_role' => $current?->pivot->role,
+                'current_organization' => $current === null ? null : [
+                    'id' => $current->id,
+                    'name' => $current->name,
+                    'slug' => $current->slug,
                 ],
             ]);
+
+            $organizations = $memberships->map(fn ($org) => [
+                'id' => $org->id,
+                'name' => $org->name,
+                'slug' => $org->slug,
+                'role' => $org->pivot->role,
+            ])->all();
         }
 
         return [
@@ -56,6 +71,7 @@ class HandleInertiaRequests extends Middleware
             'name' => config('app.name'),
             'auth' => [
                 'user' => $userPayload,
+                'organizations' => $organizations,
             ],
             'sidebarOpen' => ! $request->hasCookie('sidebar_state') || $request->cookie('sidebar_state') === 'true',
         ];

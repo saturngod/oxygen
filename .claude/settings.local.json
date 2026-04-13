@@ -4,7 +4,8 @@
       "Bash(ls -la /Users/bonjoy/Downloads/transcoder/MyanVideoTranscoder/.env*)",
       "Bash(php artisan:*)",
       "Bash(ALLOW_REGISTER=false php artisan route:list --path=register)",
-      "Bash(vendor/bin/pint --dirty --format agent)"
+      "Bash(vendor/bin/pint --dirty --format agent)",
+      "Bash(git stash:*)"
     ]
   },
   "enableAllProjectMcpServers": true,
