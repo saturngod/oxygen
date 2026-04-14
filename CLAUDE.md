@@ -241,3 +241,25 @@ When adding new server-side code that needs the active org, read `session('curre
 
 - Registration is toggleable via `ALLOW_REGISTER` in `.env`. This is evaluated in `config/fortify.php` (safe under `config:cache` because it's inside a config file), conditionally including `Features::registration()`. `routes/web.php` exposes `canRegister` to the welcome page via `Features::enabled(Features::registration())`, so the UI auto-hides the link when disabled.
 
+## Media Uploads (S3 Direct Multipart)
+
+Large media files upload directly from the browser to S3 using presigned multipart uploads. The server never proxies bytes — it only issues presigned URLs and persists the resulting `MediaFile` record. `App\Services\S3MultipartUploadManager` wraps the AWS SDK (`createMultipartUpload`, `UploadPart` presign, `completeMultipartUpload`, `abortMultipartUpload`, `headObject` for size) and is resolved via the container in `ManageController`.
+
+### Flow (routes all under `routes/web.php`, auth + organization-scoped)
+
+1. `POST manage/files/multipart/init` → `manage.files.multipart.init` — validates the target folder belongs to the active org, generates the S3 key, calls `initiate()`, and caches upload context (key, content type, folder id, original filename, org id, user id) under an `uploadId` via `Cache` so later steps can re-authorize without trusting client input.
+2. `POST manage/files/multipart/sign-part` → `manage.files.multipart.sign` — returns a presigned `UploadPart` URL for a given `uploadId` + `partNumber`. The browser PUTs the chunk directly to S3 and keeps the returned `ETag`.
+3. `POST manage/files/multipart/complete` → `manage.files.multipart.complete` — receives the ordered `{PartNumber, ETag}` list, calls `complete()`, reads object size via `headObject`, and creates the `MediaFile` row (status `MediaFileStatus::Progress` or similar — check the enum).
+4. `POST manage/files/multipart/abort` → `manage.files.multipart.abort` — calls `abortMultipartUpload` and evicts the cache entry. The frontend should call this on user cancel or fatal error to avoid orphaned parts billing.
+
+### Other manage endpoints
+
+- `POST manage/files/url` → `manage.files.url` (`storeFromUrl`) — server-side ingest from a remote URL (unchanged).
+- `DELETE manage/files/{mediaFile}` → `manage.files.destroy` (`destroyFile`) — org-scoped delete; refuses while the file is still in `MediaFileStatus::Progress`.
+- The old chunked-upload endpoints (`manage.files.store`, `manage.files.chunk`, `manage.files.chunk.finalize`, `manage.files.chunk.cancel`) and their form requests (`StoreMediaFileRequest`, `UploadChunkRequest`, `FinalizeChunkUploadRequest`) have been removed. Do not reintroduce them — use the multipart flow.
+
+### Security notes for future edits
+
+- Never trust `uploadId`, `key`, or `folder_id` from the client on sign/complete/abort calls — always re-read them from the cached upload context created during `init`, and re-check `organization_id` against `session('current_organization_id')`.
+- The frontend entry point is `resources/js/pages/manage.tsx`. When wiring new upload UI, use the Wayfinder-generated route functions (`manage.files.multipart.*`) — don't hardcode URLs.
+

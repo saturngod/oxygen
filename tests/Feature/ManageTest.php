@@ -1,14 +1,15 @@
 <?php
 
+use App\Enums\MediaFileStatus;
 use App\Enums\OrganizationRole;
 use App\Models\Folder;
 use App\Models\MediaFile;
 use App\Models\Organization;
 use App\Models\User;
+use App\Services\S3MultipartUploadManager;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Str;
 
 uses(RefreshDatabase::class);
 
@@ -78,30 +79,6 @@ test('folder creation requires a name', function () {
         ->assertSessionHasErrors('name');
 });
 
-test('authenticated user can upload an mp4 file', function () {
-    Storage::fake('s3');
-    [$user, $org] = manageActor();
-
-    $file = UploadedFile::fake()->create('promo.mp4', 1024, 'video/mp4');
-
-    $this->actingAs($user)
-        ->withSession(['current_organization_id' => $org->getKey()])
-        ->post('/manage/files', [
-            'title' => 'Promo Spot',
-            'folder_id' => null,
-            'tags' => ['summer', 'launch'],
-            'file' => $file,
-        ])
-        ->assertRedirect();
-
-    $media = MediaFile::where('organization_id', $org->id)->first();
-    expect($media)->not->toBeNull();
-    expect($media->title)->toBe('Promo Spot');
-    expect($media->tags)->toBe(['summer', 'launch']);
-    expect($media->status->value)->toBe('uploaded');
-    Storage::disk('s3')->assertExists($media->file_path);
-});
-
 test('authenticated user can add a video from a URL', function () {
     [$user, $org] = manageActor();
 
@@ -134,114 +111,211 @@ test('url import requires a valid url', function () {
         ->assertSessionHasErrors('source_url');
 });
 
-test('upload rejects non-video files', function () {
-    Storage::fake('s3');
+test('init multipart upload returns upload id and caches session', function () {
     [$user, $org] = manageActor();
 
-    $file = UploadedFile::fake()->create('doc.pdf', 100, 'application/pdf');
+    $this->mock(S3MultipartUploadManager::class)
+        ->shouldReceive('initiate')
+        ->once()
+        ->withArgs(function (string $key, string $contentType) {
+            return str_ends_with($key, '.mp4') && $contentType === 'video/mp4';
+        })
+        ->andReturn('aws-upload-id');
 
     $this->actingAs($user)
         ->withSession(['current_organization_id' => $org->getKey()])
-        ->post('/manage/files', [
-            'title' => 'Bad',
-            'file' => $file,
+        ->postJson('/manage/files/multipart/init', [
+            'file_name' => 'promo.mp4',
         ])
-        ->assertSessionHasErrors('file');
+        ->assertOk()
+        ->assertJsonPath('upload_id', 'aws-upload-id');
+
+    $session = Cache::get('manage:upload:aws-upload-id');
+    expect($session)->not->toBeNull();
+    expect($session['organization_id'])->toBe($org->getKey());
+    expect($session['user_id'])->toBe($user->getKey());
 });
 
-test('chunked upload assembles chunks and creates a media file', function () {
-    Storage::fake('local');
-    Storage::fake('s3');
+test('init rejects unsupported extensions', function () {
     [$user, $org] = manageActor();
 
-    $uploadId = (string) Str::uuid();
-    $chunks = ['AAAA', 'BBBB', 'CCCC'];
-
-    foreach ($chunks as $index => $contents) {
-        $chunk = UploadedFile::fake()->createWithContent("{$index}", $contents);
-
-        $this->actingAs($user)
-            ->withSession(['current_organization_id' => $org->getKey()])
-            ->post('/manage/files/chunk', [
-                'upload_id' => $uploadId,
-                'chunk_index' => $index,
-                'total_chunks' => count($chunks),
-                'chunk' => $chunk,
-            ])
-            ->assertOk()
-            ->assertJsonPath('upload_id', $uploadId);
-    }
+    $this->mock(S3MultipartUploadManager::class)
+        ->shouldNotReceive('initiate');
 
     $this->actingAs($user)
         ->withSession(['current_organization_id' => $org->getKey()])
-        ->post('/manage/files/chunk/finalize', [
-            'upload_id' => $uploadId,
-            'total_chunks' => count($chunks),
-            'file_name' => 'promo.mp4',
-            'title' => 'Big Promo',
-            'tags' => ['launch'],
-        ])
-        ->assertRedirect();
-
-    $media = MediaFile::where('organization_id', $org->id)->first();
-    expect($media)->not->toBeNull();
-    expect($media->file_name)->toBe('promo.mp4');
-    expect($media->size)->toBe(strlen(implode('', $chunks)));
-    Storage::disk('s3')->assertExists($media->file_path);
-    expect(Storage::disk('s3')->get($media->file_path))->toBe(implode('', $chunks));
-    Storage::disk('local')->assertMissing("chunks/{$org->id}/{$uploadId}");
-});
-
-test('chunked finalize fails when a chunk is missing', function () {
-    Storage::fake('local');
-    Storage::fake('s3');
-    [$user, $org] = manageActor();
-
-    $uploadId = (string) Str::uuid();
-
-    $this->actingAs($user)
-        ->withSession(['current_organization_id' => $org->getKey()])
-        ->post('/manage/files/chunk', [
-            'upload_id' => $uploadId,
-            'chunk_index' => 0,
-            'total_chunks' => 2,
-            'chunk' => UploadedFile::fake()->createWithContent('0', 'AAAA'),
-        ])
-        ->assertOk();
-
-    $this->actingAs($user)
-        ->withSession(['current_organization_id' => $org->getKey()])
-        ->post('/manage/files/chunk/finalize', [
-            'upload_id' => $uploadId,
-            'total_chunks' => 2,
-            'file_name' => 'promo.mp4',
-            'title' => 'Incomplete',
+        ->postJson('/manage/files/multipart/init', [
+            'file_name' => 'doc.pdf',
         ])
         ->assertStatus(422);
 });
 
-test('chunk upload can be cancelled', function () {
-    Storage::fake('local');
+test('sign part returns presigned url for owned session', function () {
     [$user, $org] = manageActor();
 
-    $uploadId = (string) Str::uuid();
+    Cache::put('manage:upload:aws-upload-id', [
+        'organization_id' => $org->getKey(),
+        'user_id' => $user->getKey(),
+        'folder_id' => null,
+        'key' => 'media/key.mp4',
+        'file_name' => 'promo.mp4',
+    ], now()->addHour());
+
+    $this->mock(S3MultipartUploadManager::class)
+        ->shouldReceive('presignPart')
+        ->once()
+        ->with('media/key.mp4', 'aws-upload-id', 3)
+        ->andReturn('http://localhost:9000/signed');
 
     $this->actingAs($user)
         ->withSession(['current_organization_id' => $org->getKey()])
-        ->post('/manage/files/chunk', [
-            'upload_id' => $uploadId,
-            'chunk_index' => 0,
-            'total_chunks' => 3,
-            'chunk' => UploadedFile::fake()->createWithContent('0', 'AAAA'),
+        ->postJson('/manage/files/multipart/sign-part', [
+            'upload_id' => 'aws-upload-id',
+            'part_number' => 3,
+        ])
+        ->assertOk()
+        ->assertJsonPath('url', 'http://localhost:9000/signed');
+});
+
+test('sign part rejects session owned by another user', function () {
+    [$user, $org] = manageActor();
+    $other = User::factory()->create();
+
+    Cache::put('manage:upload:aws-upload-id', [
+        'organization_id' => $org->getKey(),
+        'user_id' => $other->getKey(),
+        'folder_id' => null,
+        'key' => 'media/key.mp4',
+        'file_name' => 'promo.mp4',
+    ], now()->addHour());
+
+    $this->mock(S3MultipartUploadManager::class)->shouldNotReceive('presignPart');
+
+    $this->actingAs($user)
+        ->withSession(['current_organization_id' => $org->getKey()])
+        ->postJson('/manage/files/multipart/sign-part', [
+            'upload_id' => 'aws-upload-id',
+            'part_number' => 1,
+        ])
+        ->assertForbidden();
+});
+
+test('complete creates media file and clears cache', function () {
+    [$user, $org] = manageActor();
+
+    Cache::put('manage:upload:aws-upload-id', [
+        'organization_id' => $org->getKey(),
+        'user_id' => $user->getKey(),
+        'folder_id' => null,
+        'key' => 'media/'.$org->id.'/abc.mp4',
+        'file_name' => 'promo.mp4',
+    ], now()->addHour());
+
+    $mock = $this->mock(S3MultipartUploadManager::class);
+    $mock->shouldReceive('complete')
+        ->once()
+        ->with('media/'.$org->id.'/abc.mp4', 'aws-upload-id', [
+            ['PartNumber' => 1, 'ETag' => '"etag-1"'],
+            ['PartNumber' => 2, 'ETag' => '"etag-2"'],
+        ]);
+    $mock->shouldReceive('size')->once()->andReturn(12345);
+
+    $this->actingAs($user)
+        ->withSession(['current_organization_id' => $org->getKey()])
+        ->postJson('/manage/files/multipart/complete', [
+            'upload_id' => 'aws-upload-id',
+            'title' => 'Big Promo',
+            'parts' => [
+                ['part_number' => 1, 'etag' => '"etag-1"'],
+                ['part_number' => 2, 'etag' => '"etag-2"'],
+            ],
+            'tags' => ['launch'],
+        ])
+        ->assertOk()
+        ->assertJsonPath('ok', true);
+
+    $media = MediaFile::where('organization_id', $org->id)->first();
+    expect($media)->not->toBeNull();
+    expect($media->file_name)->toBe('promo.mp4');
+    expect($media->file_path)->toBe('media/'.$org->id.'/abc.mp4');
+    expect($media->size)->toBe(12345);
+    expect($media->tags)->toBe(['launch']);
+    expect(Cache::has('manage:upload:aws-upload-id'))->toBeFalse();
+});
+
+test('abort clears cache and calls s3 abort', function () {
+    [$user, $org] = manageActor();
+
+    Cache::put('manage:upload:aws-upload-id', [
+        'organization_id' => $org->getKey(),
+        'user_id' => $user->getKey(),
+        'folder_id' => null,
+        'key' => 'media/key.mp4',
+        'file_name' => 'promo.mp4',
+    ], now()->addHour());
+
+    $this->mock(S3MultipartUploadManager::class)
+        ->shouldReceive('abort')
+        ->once()
+        ->with('media/key.mp4', 'aws-upload-id');
+
+    $this->actingAs($user)
+        ->withSession(['current_organization_id' => $org->getKey()])
+        ->postJson('/manage/files/multipart/abort', [
+            'upload_id' => 'aws-upload-id',
         ])
         ->assertOk();
 
+    expect(Cache::has('manage:upload:aws-upload-id'))->toBeFalse();
+});
+
+test('authenticated user can delete a media file and its s3 object', function () {
+    Storage::fake('s3');
+    [$user, $org] = manageActor();
+
+    Storage::disk('s3')->put('media/'.$org->id.'/clip.mp4', 'fake-bytes');
+
+    $media = MediaFile::factory()->for($org)->create([
+        'file_path' => 'media/'.$org->id.'/clip.mp4',
+        'status' => MediaFileStatus::Uploaded,
+    ]);
+
     $this->actingAs($user)
         ->withSession(['current_organization_id' => $org->getKey()])
-        ->delete("/manage/files/chunk/{$uploadId}")
-        ->assertOk();
+        ->delete('/manage/files/'.$media->id)
+        ->assertRedirect();
 
-    Storage::disk('local')->assertMissing("chunks/{$org->id}/{$uploadId}");
+    expect(MediaFile::find($media->id))->toBeNull();
+    Storage::disk('s3')->assertMissing('media/'.$org->id.'/clip.mp4');
+});
+
+test('deleting a file in progress is rejected', function () {
+    Storage::fake('s3');
+    [$user, $org] = manageActor();
+
+    $media = MediaFile::factory()->for($org)->create([
+        'status' => MediaFileStatus::Progress,
+    ]);
+
+    $this->actingAs($user)
+        ->withSession(['current_organization_id' => $org->getKey()])
+        ->delete('/manage/files/'.$media->id)
+        ->assertStatus(422);
+
+    expect(MediaFile::find($media->id))->not->toBeNull();
+});
+
+test('user cannot delete a file from another organization', function () {
+    [$user, $org] = manageActor();
+    $otherOrg = Organization::factory()->create();
+    $media = MediaFile::factory()->for($otherOrg)->create();
+
+    $this->actingAs($user)
+        ->withSession(['current_organization_id' => $org->getKey()])
+        ->delete('/manage/files/'.$media->id)
+        ->assertForbidden();
+
+    expect(MediaFile::find($media->id))->not->toBeNull();
 });
 
 test('manage endpoints require an active organization', function () {

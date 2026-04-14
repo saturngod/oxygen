@@ -17,11 +17,12 @@ Route::middleware(['auth', 'verified'])->group(function () {
 
     Route::get('manage', [ManageController::class, 'index'])->name('manage');
     Route::post('manage/folders', [ManageController::class, 'storeFolder'])->name('manage.folders.store');
-    Route::post('manage/files', [ManageController::class, 'storeFile'])->name('manage.files.store');
     Route::post('manage/files/url', [ManageController::class, 'storeFromUrl'])->name('manage.files.url');
-    Route::post('manage/files/chunk', [ManageController::class, 'uploadChunk'])->name('manage.files.chunk');
-    Route::post('manage/files/chunk/finalize', [ManageController::class, 'finalizeChunkUpload'])->name('manage.files.chunk.finalize');
-    Route::delete('manage/files/chunk/{uploadId}', [ManageController::class, 'cancelChunkUpload'])->name('manage.files.chunk.cancel');
+    Route::delete('manage/files/{mediaFile}', [ManageController::class, 'destroyFile'])->name('manage.files.destroy');
+    Route::post('manage/files/multipart/init', [ManageController::class, 'initMultipartUpload'])->name('manage.files.multipart.init');
+    Route::post('manage/files/multipart/sign-part', [ManageController::class, 'signPart'])->name('manage.files.multipart.sign');
+    Route::post('manage/files/multipart/complete', [ManageController::class, 'completeMultipartUpload'])->name('manage.files.multipart.complete');
+    Route::post('manage/files/multipart/abort', [ManageController::class, 'abortMultipartUpload'])->name('manage.files.multipart.abort');
 
     Route::inertia('status', 'status')->name('status');
 

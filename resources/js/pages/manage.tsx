@@ -36,6 +36,7 @@ import {
     DropdownMenu,
     DropdownMenuContent,
     DropdownMenuItem,
+    DropdownMenuSeparator,
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
@@ -126,6 +127,7 @@ type UploadState =
 export default function Manage({ currentFolder, folders, files }: Props) {
     const [folderDialogOpen, setFolderDialogOpen] = useState(false);
     const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
+    const [fileToDelete, setFileToDelete] = useState<FileItem | null>(null);
     const [uploadTab, setUploadTab] = useState<'file' | 'url'>('file');
     const [tags, setTags] = useState<string[]>([]);
     const [tagInput, setTagInput] = useState('');
@@ -141,8 +143,10 @@ export default function Manage({ currentFolder, folders, files }: Props) {
     const [uploadProgress, setUploadProgress] = useState(0);
     const [uploadError, setUploadError] = useState<string | null>(null);
     const uploadIdRef = useRef<string | null>(null);
-    const nextChunkRef = useRef(0);
-    const totalChunksRef = useRef(0);
+    const uploadKeyRef = useRef<string | null>(null);
+    const nextPartRef = useRef(0);
+    const totalPartsRef = useRef(0);
+    const etagsRef = useRef<{ part_number: number; etag: string }[]>([]);
     const abortRef = useRef(false);
 
     setLayoutProps({
@@ -186,72 +190,123 @@ export default function Manage({ currentFolder, folders, files }: Props) {
         setUploadProgress(0);
         setUploadError(null);
         uploadIdRef.current = null;
-        nextChunkRef.current = 0;
-        totalChunksRef.current = 0;
+        uploadKeyRef.current = null;
+        nextPartRef.current = 0;
+        totalPartsRef.current = 0;
+        etagsRef.current = [];
         abortRef.current = false;
         if (fileInputRef.current) {
             fileInputRef.current.value = '';
         }
     };
 
-    const cancelChunkUpload = async () => {
-        const id = uploadIdRef.current;
-        if (!id) {
+    const postJson = async <T,>(url: string, body: unknown): Promise<T> => {
+        const res = await fetch(url, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+                'X-XSRF-TOKEN': xsrfTokenFromCookie(),
+                'X-Requested-With': 'XMLHttpRequest',
+            },
+            body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+            throw new Error(`${url} failed (${res.status})`);
+        }
+        return (await res.json()) as T;
+    };
+
+    const putPartToS3 = (url: string, slice: Blob): Promise<string> =>
+        new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('PUT', url);
+            xhr.onload = () => {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    const etag = xhr.getResponseHeader('ETag');
+                    if (!etag) {
+                        reject(
+                            new Error(
+                                'S3 response missing ETag (check bucket CORS ExposeHeaders).',
+                            ),
+                        );
+                        return;
+                    }
+                    resolve(etag);
+                } else {
+                    reject(new Error(`S3 PUT failed (${xhr.status})`));
+                }
+            };
+            xhr.onerror = () => reject(new Error('Network error during PUT'));
+            xhr.onabort = () => reject(new Error('Upload aborted'));
+            xhr.send(slice);
+        });
+
+    const cancelMultipartUpload = async () => {
+        if (!uploadIdRef.current) {
             return;
         }
         try {
-            await fetch(`/manage/files/chunk/${id}`, {
-                method: 'DELETE',
-                credentials: 'same-origin',
-                headers: {
-                    Accept: 'application/json',
-                    'X-XSRF-TOKEN': xsrfTokenFromCookie(),
-                },
+            await postJson('/manage/files/multipart/abort', {
+                upload_id: uploadIdRef.current,
             });
         } catch {
             /* ignore */
         }
     };
 
-    const runChunkLoop = async () => {
-        if (!selectedFile || !uploadIdRef.current) {
+    const runMultipartLoop = async () => {
+        if (!selectedFile) {
             return;
         }
+
         setUploadState('uploading');
         setUploadError(null);
         abortRef.current = false;
-        const total = totalChunksRef.current;
 
-        while (nextChunkRef.current < total) {
+        if (!uploadIdRef.current) {
+            try {
+                const init = await postJson<{
+                    upload_id: string;
+                    key: string;
+                }>('/manage/files/multipart/init', {
+                    file_name: selectedFile.name,
+                    folder_id: currentFolder?.id ?? null,
+                });
+                uploadIdRef.current = init.upload_id;
+                uploadKeyRef.current = init.key;
+            } catch (err) {
+                setUploadState('error');
+                setUploadError(
+                    err instanceof Error ? err.message : 'Init failed.',
+                );
+                return;
+            }
+        }
+
+        const total = totalPartsRef.current;
+
+        while (nextPartRef.current < total) {
             if (abortRef.current) {
                 return;
             }
-            const index = nextChunkRef.current;
+            const index = nextPartRef.current;
+            const partNumber = index + 1;
             const start = index * CHUNK_SIZE;
             const end = Math.min(start + CHUNK_SIZE, selectedFile.size);
             const slice = selectedFile.slice(start, end);
 
-            const formData = new FormData();
-            formData.append('upload_id', uploadIdRef.current);
-            formData.append('chunk_index', String(index));
-            formData.append('total_chunks', String(total));
-            formData.append('chunk', slice, `${index}`);
-
             try {
-                const response = await fetch('/manage/files/chunk', {
-                    method: 'POST',
-                    credentials: 'same-origin',
-                    headers: {
-                        Accept: 'application/json',
-                        'X-XSRF-TOKEN': xsrfTokenFromCookie(),
+                const { url } = await postJson<{ url: string }>(
+                    '/manage/files/multipart/sign-part',
+                    {
+                        upload_id: uploadIdRef.current,
+                        part_number: partNumber,
                     },
-                    body: formData,
-                });
-                if (!response.ok) {
-                    throw new Error(
-                        `Chunk ${index} failed (${response.status})`,
-                    );
-                }
+                );
+                const etag = await putPartToS3(url, slice);
+                etagsRef.current.push({ part_number: partNumber, etag });
             } catch (err) {
                 setUploadState('error');
                 setUploadError(
@@ -260,41 +315,31 @@ export default function Manage({ currentFolder, folders, files }: Props) {
                 return;
             }
 
-            nextChunkRef.current = index + 1;
-            setUploadProgress(
-                Math.round((nextChunkRef.current / total) * 100),
-            );
+            nextPartRef.current = index + 1;
+            setUploadProgress(Math.round((nextPartRef.current / total) * 100));
         }
 
         setUploadState('finalizing');
-        const finalizeData = new FormData();
-        finalizeData.append('upload_id', uploadIdRef.current);
-        finalizeData.append('total_chunks', String(total));
-        finalizeData.append('file_name', selectedFile.name);
-        finalizeData.append('title', uploadTitle);
-        finalizeData.append('tags', JSON.stringify(tags));
-        if (currentFolder) {
-            finalizeData.append('folder_id', currentFolder.id);
+        try {
+            await postJson('/manage/files/multipart/complete', {
+                upload_id: uploadIdRef.current,
+                title: uploadTitle,
+                parts: etagsRef.current,
+                tags,
+                folder_id: currentFolder?.id ?? null,
+            });
+        } catch (err) {
+            setUploadState('error');
+            setUploadError(
+                err instanceof Error ? err.message : 'Finalize failed.',
+            );
+            return;
         }
 
-        router.post(
-            '/manage/files/chunk/finalize',
-            finalizeData as unknown as Parameters<typeof router.post>[1],
-            {
-                forceFormData: true,
-                preserveScroll: true,
-                onError: (errors) => {
-                    setUploadState('error');
-                    setUploadErrors(errors as Record<string, string>);
-                    setUploadError('Finalize failed.');
-                },
-                onSuccess: () => {
-                    setUploadState('done');
-                    setUploadDialogOpen(false);
-                    resetUploadForm();
-                },
-            },
-        );
+        setUploadState('done');
+        setUploadDialogOpen(false);
+        resetUploadForm();
+        router.reload({ only: ['files', 'folders'] });
     };
 
     const startChunkedUpload = () => {
@@ -306,19 +351,21 @@ export default function Manage({ currentFolder, folders, files }: Props) {
             setUploadErrors({ title: 'Title is required.' });
             return;
         }
-        uploadIdRef.current = crypto.randomUUID();
-        nextChunkRef.current = 0;
-        totalChunksRef.current = Math.max(
+        uploadIdRef.current = null;
+        uploadKeyRef.current = null;
+        nextPartRef.current = 0;
+        etagsRef.current = [];
+        totalPartsRef.current = Math.max(
             1,
             Math.ceil(selectedFile.size / CHUNK_SIZE),
         );
         setUploadProgress(0);
         setUploadErrors({});
-        void runChunkLoop();
+        void runMultipartLoop();
     };
 
     const resumeChunkedUpload = () => {
-        void runChunkLoop();
+        void runMultipartLoop();
     };
 
     const pickFile = (file: File | null) => {
@@ -663,7 +710,7 @@ export default function Manage({ currentFolder, folders, files }: Props) {
                                                             : uploadState ===
                                                                 'error'
                                                               ? 'Upload paused'
-                                                              : `Uploading chunk ${nextChunkRef.current + 1}/${totalChunksRef.current}`}
+                                                              : `Uploading part ${nextPartRef.current + 1}/${totalPartsRef.current}`}
                                                     </span>
                                                     <span className="font-medium">
                                                         {uploadProgress}%
@@ -699,7 +746,7 @@ export default function Manage({ currentFolder, folders, files }: Props) {
                                                         onClick={async () => {
                                                             abortRef.current =
                                                                 true;
-                                                            await cancelChunkUpload();
+                                                            await cancelMultipartUpload();
                                                             setUploadDialogOpen(
                                                                 false,
                                                             );
@@ -1017,6 +1064,21 @@ export default function Manage({ currentFolder, folders, files }: Props) {
                                                     <DropdownMenuItem disabled>
                                                         Requeue (soon)
                                                     </DropdownMenuItem>
+                                                    <DropdownMenuSeparator />
+                                                    <DropdownMenuItem
+                                                        variant="destructive"
+                                                        disabled={
+                                                            file.status ===
+                                                            'progress'
+                                                        }
+                                                        onClick={() =>
+                                                            setFileToDelete(
+                                                                file,
+                                                            )
+                                                        }
+                                                    >
+                                                        Delete
+                                                    </DropdownMenuItem>
                                                 </DropdownMenuContent>
                                             </DropdownMenu>
                                         </TableCell>
@@ -1039,6 +1101,47 @@ export default function Manage({ currentFolder, folders, files }: Props) {
                     </div>
                 </div>
             </div>
+
+            <Dialog
+                open={fileToDelete !== null}
+                onOpenChange={(open) => {
+                    if (!open) {
+                        setFileToDelete(null);
+                    }
+                }}
+            >
+                <DialogContent>
+                    <DialogHeader>
+                        <DialogTitle>Delete file</DialogTitle>
+                        <DialogDescription>
+                            This permanently deletes “{fileToDelete?.title}”
+                            and its file on S3. This cannot be undone.
+                        </DialogDescription>
+                    </DialogHeader>
+                    <DialogFooter className="gap-2">
+                        <DialogClose asChild>
+                            <Button variant="secondary">Cancel</Button>
+                        </DialogClose>
+                        <Button
+                            variant="destructive"
+                            onClick={() => {
+                                if (!fileToDelete) {
+                                    return;
+                                }
+                                router.delete(
+                                    `/manage/files/${fileToDelete.id}`,
+                                    {
+                                        preserveScroll: true,
+                                        onFinish: () => setFileToDelete(null),
+                                    },
+                                );
+                            }}
+                        >
+                            Delete
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
         </>
     );
 }

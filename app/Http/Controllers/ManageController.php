@@ -3,16 +3,15 @@
 namespace App\Http\Controllers;
 
 use App\Enums\MediaFileStatus;
-use App\Http\Requests\Manage\FinalizeChunkUploadRequest;
 use App\Http\Requests\Manage\StoreFolderRequest;
-use App\Http\Requests\Manage\StoreMediaFileRequest;
 use App\Http\Requests\Manage\StoreMediaUrlRequest;
-use App\Http\Requests\Manage\UploadChunkRequest;
 use App\Models\Folder;
 use App\Models\MediaFile;
+use App\Services\S3MultipartUploadManager;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Inertia\Inertia;
@@ -20,8 +19,6 @@ use Inertia\Response;
 
 class ManageController extends Controller
 {
-    private const MEDIA_DISK = 's3';
-
     public function index(Request $request): Response
     {
         $organizationId = $this->currentOrganizationId($request);
@@ -81,32 +78,24 @@ class ManageController extends Controller
         return back()->with('toast', ['type' => 'success', 'message' => __('Folder created.')]);
     }
 
-    public function storeFile(StoreMediaFileRequest $request): RedirectResponse
+    public function destroyFile(Request $request, MediaFile $mediaFile): RedirectResponse
     {
         $organizationId = $this->currentOrganizationId($request);
 
-        $folderId = $request->input('folder_id');
-        if ($folderId !== null) {
-            Folder::query()
-                ->where('organization_id', $organizationId)
-                ->findOrFail($folderId);
+        abort_unless($mediaFile->organization_id === $organizationId, 403);
+        abort_if(
+            $mediaFile->status === MediaFileStatus::Progress,
+            422,
+            __('Cannot delete a file while it is being processed.'),
+        );
+
+        if ($mediaFile->file_path !== null) {
+            Storage::disk('s3')->delete($mediaFile->file_path);
         }
 
-        $uploaded = $request->file('file');
-        $path = $uploaded->store('media/'.$organizationId, self::MEDIA_DISK);
+        $mediaFile->delete();
 
-        MediaFile::create([
-            'organization_id' => $organizationId,
-            'folder_id' => $folderId,
-            'title' => $request->string('title'),
-            'file_name' => $uploaded->getClientOriginalName(),
-            'file_path' => $path,
-            'size' => $uploaded->getSize(),
-            'status' => MediaFileStatus::Uploaded,
-            'tags' => $request->input('tags', []),
-        ]);
-
-        return back()->with('toast', ['type' => 'success', 'message' => __('File uploaded.')]);
+        return back()->with('toast', ['type' => 'success', 'message' => __('File deleted.')]);
     }
 
     public function storeFromUrl(StoreMediaUrlRequest $request): RedirectResponse
@@ -135,121 +124,143 @@ class ManageController extends Controller
         return back()->with('toast', ['type' => 'success', 'message' => __('Video queued from URL.')]);
     }
 
-    public function uploadChunk(UploadChunkRequest $request): JsonResponse
+    public function initMultipartUpload(Request $request, S3MultipartUploadManager $s3): JsonResponse
     {
         $organizationId = $this->currentOrganizationId($request);
 
-        $uploadId = (string) $request->string('upload_id');
-        $index = (int) $request->integer('chunk_index');
-        $total = (int) $request->integer('total_chunks');
-
-        $disk = Storage::disk('local');
-        $dir = "chunks/{$organizationId}/{$uploadId}";
-        $disk->makeDirectory($dir);
-
-        $request->file('chunk')->storeAs($dir, (string) $index, 'local');
-
-        $received = collect($disk->files($dir))
-            ->map(fn (string $path) => (int) basename($path))
-            ->sort()
-            ->values()
-            ->all();
-
-        return response()->json([
-            'upload_id' => $uploadId,
-            'received' => $received,
-            'total' => $total,
+        $validated = $request->validate([
+            'file_name' => ['required', 'string', 'max:255'],
+            'folder_id' => ['nullable', 'uuid', 'exists:folders,id'],
         ]);
-    }
 
-    public function finalizeChunkUpload(FinalizeChunkUploadRequest $request): RedirectResponse
-    {
-        $organizationId = $this->currentOrganizationId($request);
-
-        $folderId = $request->input('folder_id');
-        if ($folderId !== null) {
+        if ($validated['folder_id'] ?? null) {
             Folder::query()
                 ->where('organization_id', $organizationId)
-                ->findOrFail($folderId);
+                ->findOrFail($validated['folder_id']);
         }
 
-        $uploadId = (string) $request->string('upload_id');
-        $total = (int) $request->integer('total_chunks');
-        $originalName = (string) $request->string('file_name');
-
+        $originalName = $validated['file_name'];
         $extension = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
         abort_unless(in_array($extension, ['mp4', 'mov'], true), 422, 'Unsupported file extension.');
 
-        $local = Storage::disk('local');
-        $dir = "chunks/{$organizationId}/{$uploadId}";
+        $contentType = $extension === 'mov' ? 'video/quicktime' : 'video/mp4';
+        $key = 'media/'.$organizationId.'/'.Str::uuid()->toString().'.'.$extension;
 
-        abort_unless($local->exists($dir), 404, 'Upload session not found.');
+        $uploadId = $s3->initiate($key, $contentType);
 
-        for ($i = 0; $i < $total; $i++) {
-            abort_unless($local->exists("{$dir}/{$i}"), 422, "Missing chunk {$i}.");
-        }
-
-        $targetRelative = 'media/'.$organizationId.'/'.Str::uuid()->toString().'.'.$extension;
-
-        $tempPath = tempnam(sys_get_temp_dir(), 'upload-');
-        abort_if($tempPath === false, 500, 'Could not allocate temp file.');
-
-        $tempHandle = fopen($tempPath, 'wb');
-        abort_if($tempHandle === false, 500, 'Could not open temp file.');
-
-        try {
-            for ($i = 0; $i < $total; $i++) {
-                $chunkStream = $local->readStream("{$dir}/{$i}");
-                if ($chunkStream === null) {
-                    throw new \RuntimeException("Unable to read chunk {$i}.");
-                }
-                stream_copy_to_stream($chunkStream, $tempHandle);
-                fclose($chunkStream);
-            }
-        } finally {
-            fclose($tempHandle);
-        }
-
-        $media = Storage::disk(self::MEDIA_DISK);
-        $uploadStream = fopen($tempPath, 'rb');
-        abort_if($uploadStream === false, 500, 'Could not re-open temp file.');
-
-        try {
-            $media->writeStream($targetRelative, $uploadStream);
-        } finally {
-            if (is_resource($uploadStream)) {
-                fclose($uploadStream);
-            }
-        }
-
-        $size = filesize($tempPath) ?: 0;
-
-        @unlink($tempPath);
-        $local->deleteDirectory($dir);
-
-        MediaFile::create([
+        Cache::put($this->uploadCacheKey($uploadId), [
             'organization_id' => $organizationId,
-            'folder_id' => $folderId,
-            'title' => $request->string('title'),
+            'user_id' => $request->user()?->getKey(),
+            'folder_id' => $validated['folder_id'] ?? null,
+            'key' => $key,
             'file_name' => $originalName,
-            'file_path' => $targetRelative,
-            'size' => $size,
-            'status' => MediaFileStatus::Uploaded,
-            'tags' => $request->input('tags', []),
-        ]);
+        ], now()->addHours(24));
 
-        return back()->with('toast', ['type' => 'success', 'message' => __('File uploaded.')]);
+        return response()->json([
+            'upload_id' => $uploadId,
+            'key' => $key,
+        ]);
     }
 
-    public function cancelChunkUpload(Request $request, string $uploadId): JsonResponse
+    public function signPart(Request $request, S3MultipartUploadManager $s3): JsonResponse
     {
-        $organizationId = $this->currentOrganizationId($request);
+        $validated = $request->validate([
+            'upload_id' => ['required', 'string'],
+            'part_number' => ['required', 'integer', 'min:1', 'max:10000'],
+        ]);
 
-        abort_unless(preg_match('/^[a-zA-Z0-9\-]{8,64}$/', $uploadId) === 1, 422);
+        $session = $this->authorizeUploadSession($request, $validated['upload_id']);
 
-        Storage::disk('local')->deleteDirectory("chunks/{$organizationId}/{$uploadId}");
+        $url = $s3->presignPart($session['key'], $validated['upload_id'], (int) $validated['part_number']);
+
+        return response()->json(['url' => $url]);
+    }
+
+    public function completeMultipartUpload(Request $request, S3MultipartUploadManager $s3): JsonResponse
+    {
+        $validated = $request->validate([
+            'upload_id' => ['required', 'string'],
+            'title' => ['required', 'string', 'max:255'],
+            'parts' => ['required', 'array', 'min:1'],
+            'parts.*.part_number' => ['required', 'integer', 'min:1', 'max:10000'],
+            'parts.*.etag' => ['required', 'string'],
+            'tags' => ['nullable', 'array'],
+            'tags.*' => ['string', 'max:50'],
+        ]);
+
+        $session = $this->authorizeUploadSession($request, $validated['upload_id']);
+
+        $parts = array_map(fn (array $p) => [
+            'PartNumber' => (int) $p['part_number'],
+            'ETag' => (string) $p['etag'],
+        ], $validated['parts']);
+
+        $s3->complete($session['key'], $validated['upload_id'], $parts);
+
+        $size = 0;
+        try {
+            $size = $s3->size($session['key']);
+        } catch (\Throwable) {
+            $size = 0;
+        }
+
+        MediaFile::create([
+            'organization_id' => $session['organization_id'],
+            'folder_id' => $session['folder_id'],
+            'title' => $validated['title'],
+            'file_name' => $session['file_name'],
+            'file_path' => $session['key'],
+            'size' => $size,
+            'status' => MediaFileStatus::Uploaded,
+            'tags' => $validated['tags'] ?? [],
+        ]);
+
+        Cache::forget($this->uploadCacheKey($validated['upload_id']));
 
         return response()->json(['ok' => true]);
+    }
+
+    public function abortMultipartUpload(Request $request, S3MultipartUploadManager $s3): JsonResponse
+    {
+        $validated = $request->validate([
+            'upload_id' => ['required', 'string'],
+        ]);
+
+        $session = $this->authorizeUploadSession($request, $validated['upload_id']);
+
+        try {
+            $s3->abort($session['key'], $validated['upload_id']);
+        } catch (\Throwable) {
+            // best effort
+        }
+
+        Cache::forget($this->uploadCacheKey($validated['upload_id']));
+
+        return response()->json(['ok' => true]);
+    }
+
+    /**
+     * @return array{organization_id: string, user_id: int|string|null, folder_id: ?string, key: string, file_name: string}
+     */
+    private function authorizeUploadSession(Request $request, string $uploadId): array
+    {
+        /** @var array{organization_id: string, user_id: int|string|null, folder_id: ?string, key: string, file_name: string}|null $session */
+        $session = Cache::get($this->uploadCacheKey($uploadId));
+
+        abort_if($session === null, 404, 'Upload session not found.');
+
+        abort_unless(
+            $session['organization_id'] === $this->currentOrganizationId($request)
+            && $session['user_id'] === $request->user()?->getKey(),
+            403,
+        );
+
+        return $session;
+    }
+
+    private function uploadCacheKey(string $uploadId): string
+    {
+        return 'manage:upload:'.$uploadId;
     }
 
     private function currentOrganizationId(Request $request): string
