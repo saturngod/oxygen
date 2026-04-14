@@ -2,9 +2,12 @@
 
 use App\Enums\MediaFileStatus;
 use App\Enums\OrganizationRole;
+use App\Enums\VideoQuality;
 use App\Models\Folder;
 use App\Models\MediaFile;
+use App\Models\MediaFileProfile;
 use App\Models\Organization;
+use App\Models\Profile;
 use App\Models\User;
 use App\Services\S3MultipartUploadManager;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -18,12 +21,17 @@ function manageActor(): array
     $user = User::factory()->create();
     $organization = Organization::factory()->create();
     $organization->users()->attach($user, ['role' => OrganizationRole::Admin->value]);
+    $profile = Profile::factory()->for($organization)->create([
+        'name' => 'Default',
+        'qualities' => [VideoQuality::Hd720p->value, VideoQuality::Hd1080p->value],
+        'is_default' => true,
+    ]);
 
-    return [$user, $organization];
+    return [$user, $organization, $profile];
 }
 
 test('index lists folders and root-level files', function () {
-    [$user, $org] = manageActor();
+    [$user, $org, $profile] = manageActor();
 
     $rootFile = MediaFile::factory()->for($org)->create(['title' => 'Root clip']);
     $folder = Folder::factory()->for($org)->create(['name' => 'Campaigns']);
@@ -44,7 +52,7 @@ test('index lists folders and root-level files', function () {
 });
 
 test('index scopes files to the selected folder', function () {
-    [$user, $org] = manageActor();
+    [$user, $org, $profile] = manageActor();
     $folder = Folder::factory()->for($org)->create(['name' => 'Campaigns']);
     MediaFile::factory()->for($org)->create(['folder_id' => $folder->id, 'title' => 'Inside']);
     MediaFile::factory()->for($org)->create(['title' => 'Root clip']);
@@ -60,7 +68,7 @@ test('index scopes files to the selected folder', function () {
 });
 
 test('authenticated user can create a folder in active organization', function () {
-    [$user, $org] = manageActor();
+    [$user, $org, $profile] = manageActor();
 
     $this->actingAs($user)
         ->withSession(['current_organization_id' => $org->getKey()])
@@ -71,7 +79,7 @@ test('authenticated user can create a folder in active organization', function (
 });
 
 test('folder creation requires a name', function () {
-    [$user, $org] = manageActor();
+    [$user, $org, $profile] = manageActor();
 
     $this->actingAs($user)
         ->withSession(['current_organization_id' => $org->getKey()])
@@ -80,13 +88,14 @@ test('folder creation requires a name', function () {
 });
 
 test('authenticated user can add a video from a URL', function () {
-    [$user, $org] = manageActor();
+    [$user, $org, $profile] = manageActor();
 
     $this->actingAs($user)
         ->withSession(['current_organization_id' => $org->getKey()])
         ->post('/manage/files/url', [
             'title' => 'Remote clip',
             'source_url' => 'https://cdn.example.com/videos/promo.mp4',
+            'profile_id' => $profile->id,
             'tags' => ['remote'],
         ])
         ->assertRedirect();
@@ -97,22 +106,81 @@ test('authenticated user can add a video from a URL', function () {
     expect($media->file_name)->toBe('promo.mp4');
     expect($media->file_path)->toBeNull();
     expect($media->tags)->toBe(['remote']);
+
+    $snapshot = $media->profiles()->sole();
+    expect($snapshot->profile_id)->toBe($profile->id)
+        ->and($snapshot->name)->toBe('Default')
+        ->and($snapshot->qualities)->toBe([VideoQuality::Hd720p->value, VideoQuality::Hd1080p->value]);
+});
+
+test('url import requires a profile', function () {
+    [$user, $org] = manageActor();
+
+    $this->actingAs($user)
+        ->withSession(['current_organization_id' => $org->getKey()])
+        ->post('/manage/files/url', [
+            'title' => 'Remote clip',
+            'source_url' => 'https://cdn.example.com/videos/promo.mp4',
+        ])
+        ->assertSessionHasErrors('profile_id');
+
+    expect(MediaFile::query()->count())->toBe(0);
+});
+
+test('url import rejects profile from another organization', function () {
+    [$user, $org] = manageActor();
+    $otherOrg = Organization::factory()->create();
+    $foreignProfile = Profile::factory()->for($otherOrg)->create();
+
+    $this->actingAs($user)
+        ->withSession(['current_organization_id' => $org->getKey()])
+        ->post('/manage/files/url', [
+            'title' => 'Remote clip',
+            'source_url' => 'https://cdn.example.com/videos/promo.mp4',
+            'profile_id' => $foreignProfile->id,
+        ])
+        ->assertStatus(422);
+
+    expect(MediaFile::query()->count())->toBe(0);
+});
+
+test('profile snapshot survives later edits to the source profile', function () {
+    [$user, $org, $profile] = manageActor();
+
+    $this->actingAs($user)
+        ->withSession(['current_organization_id' => $org->getKey()])
+        ->post('/manage/files/url', [
+            'title' => 'Remote clip',
+            'source_url' => 'https://cdn.example.com/videos/promo.mp4',
+            'profile_id' => $profile->id,
+        ])
+        ->assertRedirect();
+
+    $profile->update([
+        'name' => 'Renamed',
+        'qualities' => [VideoQuality::Sd480p->value],
+    ]);
+
+    $snapshot = MediaFileProfile::query()->sole();
+    expect($snapshot->name)->toBe('Default')
+        ->and($snapshot->qualities)->toBe([VideoQuality::Hd720p->value, VideoQuality::Hd1080p->value]);
 });
 
 test('url import requires a valid url', function () {
-    [$user, $org] = manageActor();
+    [$user, $org, $profile] = manageActor();
 
     $this->actingAs($user)
         ->withSession(['current_organization_id' => $org->getKey()])
         ->post('/manage/files/url', [
             'title' => 'Bad',
             'source_url' => 'not-a-url',
+            'profile_id' => $profile->id,
         ])
         ->assertSessionHasErrors('source_url');
 });
 
 test('init multipart upload returns upload id and caches session', function () {
-    [$user, $org] = manageActor();
+    [$user, $org, $profile] = manageActor();
 
     $this->mock(S3MultipartUploadManager::class)
         ->shouldReceive('initiate')
@@ -126,6 +194,7 @@ test('init multipart upload returns upload id and caches session', function () {
         ->withSession(['current_organization_id' => $org->getKey()])
         ->postJson('/manage/files/multipart/init', [
             'file_name' => 'promo.mp4',
+            'profile_id' => $profile->id,
         ])
         ->assertOk()
         ->assertJsonPath('upload_id', 'aws-upload-id');
@@ -134,10 +203,30 @@ test('init multipart upload returns upload id and caches session', function () {
     expect($session)->not->toBeNull();
     expect($session['organization_id'])->toBe($org->getKey());
     expect($session['user_id'])->toBe($user->getKey());
+    expect($session['profile_id'])->toBe($profile->id);
+    expect($session['profile_name'])->toBe('Default');
+    expect($session['profile_qualities'])->toBe([VideoQuality::Hd720p->value, VideoQuality::Hd1080p->value]);
+});
+
+test('init multipart upload rejects profile from another organization', function () {
+    [$user, $org] = manageActor();
+    $otherOrg = Organization::factory()->create();
+    $foreign = Profile::factory()->for($otherOrg)->create();
+
+    $this->mock(S3MultipartUploadManager::class)
+        ->shouldNotReceive('initiate');
+
+    $this->actingAs($user)
+        ->withSession(['current_organization_id' => $org->getKey()])
+        ->postJson('/manage/files/multipart/init', [
+            'file_name' => 'promo.mp4',
+            'profile_id' => $foreign->id,
+        ])
+        ->assertStatus(422);
 });
 
 test('init rejects unsupported extensions', function () {
-    [$user, $org] = manageActor();
+    [$user, $org, $profile] = manageActor();
 
     $this->mock(S3MultipartUploadManager::class)
         ->shouldNotReceive('initiate');
@@ -146,12 +235,13 @@ test('init rejects unsupported extensions', function () {
         ->withSession(['current_organization_id' => $org->getKey()])
         ->postJson('/manage/files/multipart/init', [
             'file_name' => 'doc.pdf',
+            'profile_id' => $profile->id,
         ])
         ->assertStatus(422);
 });
 
 test('sign part returns presigned url for owned session', function () {
-    [$user, $org] = manageActor();
+    [$user, $org, $profile] = manageActor();
 
     Cache::put('manage:upload:aws-upload-id', [
         'organization_id' => $org->getKey(),
@@ -159,6 +249,9 @@ test('sign part returns presigned url for owned session', function () {
         'folder_id' => null,
         'key' => 'media/key.mp4',
         'file_name' => 'promo.mp4',
+        'profile_id' => $profile->id,
+        'profile_name' => 'Default',
+        'profile_qualities' => [VideoQuality::Hd720p->value],
     ], now()->addHour());
 
     $this->mock(S3MultipartUploadManager::class)
@@ -178,7 +271,7 @@ test('sign part returns presigned url for owned session', function () {
 });
 
 test('sign part rejects session owned by another user', function () {
-    [$user, $org] = manageActor();
+    [$user, $org, $profile] = manageActor();
     $other = User::factory()->create();
 
     Cache::put('manage:upload:aws-upload-id', [
@@ -187,6 +280,9 @@ test('sign part rejects session owned by another user', function () {
         'folder_id' => null,
         'key' => 'media/key.mp4',
         'file_name' => 'promo.mp4',
+        'profile_id' => $profile->id,
+        'profile_name' => 'Default',
+        'profile_qualities' => [VideoQuality::Hd720p->value],
     ], now()->addHour());
 
     $this->mock(S3MultipartUploadManager::class)->shouldNotReceive('presignPart');
@@ -201,7 +297,7 @@ test('sign part rejects session owned by another user', function () {
 });
 
 test('complete creates media file and clears cache', function () {
-    [$user, $org] = manageActor();
+    [$user, $org, $profile] = manageActor();
 
     Cache::put('manage:upload:aws-upload-id', [
         'organization_id' => $org->getKey(),
@@ -209,6 +305,9 @@ test('complete creates media file and clears cache', function () {
         'folder_id' => null,
         'key' => 'media/'.$org->id.'/abc.mp4',
         'file_name' => 'promo.mp4',
+        'profile_id' => $profile->id,
+        'profile_name' => 'Default',
+        'profile_qualities' => [VideoQuality::Hd720p->value, VideoQuality::Hd1080p->value],
     ], now()->addHour());
 
     $mock = $this->mock(S3MultipartUploadManager::class);
@@ -241,10 +340,15 @@ test('complete creates media file and clears cache', function () {
     expect($media->size)->toBe(12345);
     expect($media->tags)->toBe(['launch']);
     expect(Cache::has('manage:upload:aws-upload-id'))->toBeFalse();
+
+    $snapshot = $media->profiles()->sole();
+    expect($snapshot->profile_id)->toBe($profile->id)
+        ->and($snapshot->name)->toBe('Default')
+        ->and($snapshot->qualities)->toBe([VideoQuality::Hd720p->value, VideoQuality::Hd1080p->value]);
 });
 
 test('abort clears cache and calls s3 abort', function () {
-    [$user, $org] = manageActor();
+    [$user, $org, $profile] = manageActor();
 
     Cache::put('manage:upload:aws-upload-id', [
         'organization_id' => $org->getKey(),
@@ -252,6 +356,9 @@ test('abort clears cache and calls s3 abort', function () {
         'folder_id' => null,
         'key' => 'media/key.mp4',
         'file_name' => 'promo.mp4',
+        'profile_id' => $profile->id,
+        'profile_name' => 'Default',
+        'profile_qualities' => [VideoQuality::Hd720p->value],
     ], now()->addHour());
 
     $this->mock(S3MultipartUploadManager::class)
@@ -271,7 +378,7 @@ test('abort clears cache and calls s3 abort', function () {
 
 test('authenticated user can delete a media file and its s3 object', function () {
     Storage::fake('s3');
-    [$user, $org] = manageActor();
+    [$user, $org, $profile] = manageActor();
 
     Storage::disk('s3')->put('media/'.$org->id.'/clip.mp4', 'fake-bytes');
 
@@ -291,7 +398,7 @@ test('authenticated user can delete a media file and its s3 object', function ()
 
 test('deleting a file in progress is rejected', function () {
     Storage::fake('s3');
-    [$user, $org] = manageActor();
+    [$user, $org, $profile] = manageActor();
 
     $media = MediaFile::factory()->for($org)->create([
         'status' => MediaFileStatus::Progress,
@@ -306,7 +413,7 @@ test('deleting a file in progress is rejected', function () {
 });
 
 test('user cannot delete a file from another organization', function () {
-    [$user, $org] = manageActor();
+    [$user, $org, $profile] = manageActor();
     $otherOrg = Organization::factory()->create();
     $media = MediaFile::factory()->for($otherOrg)->create();
 

@@ -237,6 +237,16 @@ When adding new server-side code that needs the active org, read `session('curre
 - Frontend entry point: `resources/js/components/organization-switcher.tsx` (rendered in `app-header.tsx` in place of the app logo). It uses the Wayfinder-generated `organizations.switch()` route and calls `router.put(..., {}, { preserveScroll: true })`.
 - Any new feature scoped to an organization should filter by the active org id from the session — never trust a client-sent organization id without re-authorizing membership.
 
+### Route permission layering
+
+`routes/web.php` uses three concentric gates. Put new routes in the group that matches the access level you want — do not re-implement these checks inside controllers.
+
+1. `auth` + `verified` — outermost group. Authenticated + email-verified users only. The **only** route that sits directly inside this group (and no deeper) is `PUT organizations/{organization}/switch`, because membership is validated by `OrganizationSwitchController` itself and gating the switch on existing membership would create bootstrap problems when memberships change.
+2. `EnsureOrganizationMember::class` — nested inside (1). Aborts 403 if `$request->user()->organizations()->exists()` is false. Wraps the normal app surface: `dashboard`, all `manage/*` routes, `status`. An authenticated user with zero memberships cannot reach any of these.
+3. `EnsureOrganizationAdmin::class` — sibling nested group under `admin/organizations/{organization}/...`. Resolves the `{organization}` route binding and aborts 403 unless the user has `OrganizationRole::Admin` on **that specific org** (not just "any admin role anywhere"). Wraps all `admin.organizations.*` routes — settings, users, profiles.
+
+When adding routes: pick the group by required privilege. A generic user-facing feature goes in (2), anything that mutates org-level configuration goes in (3). Do not duplicate the membership/role check inside the controller — the middleware already ran.
+
 ### Registration gate
 
 - Registration is toggleable via `ALLOW_REGISTER` in `.env`. This is evaluated in `config/fortify.php` (safe under `config:cache` because it's inside a config file), conditionally including `Features::registration()`. `routes/web.php` exposes `canRegister` to the welcome page via `Features::enabled(Features::registration())`, so the UI auto-hides the link when disabled.
@@ -262,4 +272,13 @@ Large media files upload directly from the browser to S3 using presigned multipa
 
 - Never trust `uploadId`, `key`, or `folder_id` from the client on sign/complete/abort calls — always re-read them from the cached upload context created during `init`, and re-check `organization_id` against `session('current_organization_id')`.
 - The frontend entry point is `resources/js/pages/manage.tsx`. When wiring new upload UI, use the Wayfinder-generated route functions (`manage.files.multipart.*`) — don't hardcode URLs.
+
+## Coding Profiles
+
+Each organization has many `App\Models\Profile` rows (uuid, `organization_id`, `name`, `qualities` json, `is_default` bool). A profile captures which output renditions should be produced when a media file is encoded.
+
+- **Quality catalog** lives in `App\Enums\VideoQuality` as the single source of truth: seven cases from `Sd240p` through `Uhd2160p`, each with `category` (SD/HD/4K), `label`, `width`, `height`, `bitrate_kbps`. The create page is fed by `VideoQuality::catalog()` — when adding or changing renditions, edit the enum, not the frontend. Validation uses `Rule::enum(VideoQuality::class)` so unknown values are rejected server-side.
+- **Exactly one default per org.** `OrganizationProfilesController::store` auto-marks the first profile an org creates as default; subsequent creates stay non-default. `makeDefault` runs inside a `DB::transaction` that clears the previous default in the same org before promoting the target, so the "one default" invariant holds even under concurrent promotes. `makeDefault` also 404s if the profile's `organization_id` doesn't match the URL's org — don't rely on route-model-binding alone to enforce cross-org isolation for nested resources.
+- Admin-only: all routes live under `admin/organizations/{organization}/profiles*` inside the `EnsureOrganizationAdmin` group. Operators cannot create or promote profiles.
+- Frontend: `resources/js/pages/admin/profiles/index.tsx` (list + make-default confirm dialog) and `resources/js/pages/admin/profiles/create.tsx` (name + multi-quality picker grouped by SD/HD/4K). The create form ships hidden `qualities[]` inputs alongside the Wayfinder `store.form()` action so the payload matches `StoreProfileRequest`. Use design tokens (`primary`, `border`, `muted-foreground`, etc.) — do not hardcode colors.
 

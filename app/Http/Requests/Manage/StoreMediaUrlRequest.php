@@ -21,6 +21,7 @@ class StoreMediaUrlRequest extends FormRequest
             'title' => ['required', 'string', 'max:255'],
             'source_url' => ['required', 'url:http,https', 'max:2048'],
             'folder_id' => ['nullable', 'uuid', 'exists:folders,id'],
+            'profile_id' => ['required', 'uuid'],
             'tags' => ['nullable', 'array'],
             'tags.*' => ['string', 'max:50'],
         ];

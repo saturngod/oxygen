@@ -7,11 +7,13 @@ use App\Http\Requests\Manage\StoreFolderRequest;
 use App\Http\Requests\Manage\StoreMediaUrlRequest;
 use App\Models\Folder;
 use App\Models\MediaFile;
+use App\Models\Profile;
 use App\Services\S3MultipartUploadManager;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Inertia\Inertia;
@@ -44,6 +46,7 @@ class ManageController extends Controller
         $files = MediaFile::query()
             ->where('organization_id', $organizationId)
             ->where('folder_id', $currentFolder?->id)
+            ->with('profiles:id,media_file_id,name,qualities')
             ->orderByDesc('created_at')
             ->get()
             ->map(fn (MediaFile $file) => [
@@ -56,7 +59,25 @@ class ManageController extends Controller
                 'tags' => $file->tags ?? [],
                 'size' => $file->size,
                 'created_at' => $file->created_at?->toIso8601String(),
+                'profiles' => $file->profiles->map(fn ($profile) => [
+                    'id' => $profile->id,
+                    'name' => $profile->name,
+                    'qualities' => $profile->qualities,
+                ])->all(),
             ]);
+
+        $profiles = Profile::query()
+            ->where('organization_id', $organizationId)
+            ->orderByDesc('is_default')
+            ->orderBy('name')
+            ->get(['id', 'name', 'qualities', 'is_default'])
+            ->map(fn (Profile $profile): array => [
+                'id' => $profile->id,
+                'name' => $profile->name,
+                'qualities' => $profile->qualities,
+                'is_default' => $profile->is_default,
+            ])
+            ->all();
 
         return Inertia::render('manage', [
             'currentFolder' => $currentFolder === null ? null : [
@@ -65,6 +86,7 @@ class ManageController extends Controller
             ],
             'folders' => $folders,
             'files' => $files,
+            'profiles' => $profiles,
         ]);
     }
 
@@ -109,17 +131,23 @@ class ManageController extends Controller
                 ->findOrFail($folderId);
         }
 
+        $profile = $this->resolveProfile($organizationId, $request->string('profile_id'));
+
         $sourceUrl = (string) $request->string('source_url');
 
-        MediaFile::create([
-            'organization_id' => $organizationId,
-            'folder_id' => $folderId,
-            'title' => $request->string('title'),
-            'file_name' => basename(parse_url($sourceUrl, PHP_URL_PATH) ?: ''),
-            'source_url' => $sourceUrl,
-            'status' => MediaFileStatus::Uploaded,
-            'tags' => $request->input('tags', []),
-        ]);
+        DB::transaction(function () use ($request, $organizationId, $folderId, $sourceUrl, $profile): void {
+            $mediaFile = MediaFile::create([
+                'organization_id' => $organizationId,
+                'folder_id' => $folderId,
+                'title' => $request->string('title'),
+                'file_name' => basename(parse_url($sourceUrl, PHP_URL_PATH) ?: ''),
+                'source_url' => $sourceUrl,
+                'status' => MediaFileStatus::Uploaded,
+                'tags' => $request->input('tags', []),
+            ]);
+
+            $this->attachProfileSnapshot($mediaFile, $profile);
+        });
 
         return back()->with('toast', ['type' => 'success', 'message' => __('Video queued from URL.')]);
     }
@@ -131,6 +159,7 @@ class ManageController extends Controller
         $validated = $request->validate([
             'file_name' => ['required', 'string', 'max:255'],
             'folder_id' => ['nullable', 'uuid', 'exists:folders,id'],
+            'profile_id' => ['required', 'uuid'],
         ]);
 
         if ($validated['folder_id'] ?? null) {
@@ -138,6 +167,8 @@ class ManageController extends Controller
                 ->where('organization_id', $organizationId)
                 ->findOrFail($validated['folder_id']);
         }
+
+        $profile = $this->resolveProfile($organizationId, $validated['profile_id']);
 
         $originalName = $validated['file_name'];
         $extension = strtolower(pathinfo($originalName, PATHINFO_EXTENSION));
@@ -154,6 +185,9 @@ class ManageController extends Controller
             'folder_id' => $validated['folder_id'] ?? null,
             'key' => $key,
             'file_name' => $originalName,
+            'profile_id' => $profile->id,
+            'profile_name' => $profile->name,
+            'profile_qualities' => $profile->qualities,
         ], now()->addHours(24));
 
         return response()->json([
@@ -204,16 +238,24 @@ class ManageController extends Controller
             $size = 0;
         }
 
-        MediaFile::create([
-            'organization_id' => $session['organization_id'],
-            'folder_id' => $session['folder_id'],
-            'title' => $validated['title'],
-            'file_name' => $session['file_name'],
-            'file_path' => $session['key'],
-            'size' => $size,
-            'status' => MediaFileStatus::Uploaded,
-            'tags' => $validated['tags'] ?? [],
-        ]);
+        DB::transaction(function () use ($session, $validated, $size): void {
+            $mediaFile = MediaFile::create([
+                'organization_id' => $session['organization_id'],
+                'folder_id' => $session['folder_id'],
+                'title' => $validated['title'],
+                'file_name' => $session['file_name'],
+                'file_path' => $session['key'],
+                'size' => $size,
+                'status' => MediaFileStatus::Uploaded,
+                'tags' => $validated['tags'] ?? [],
+            ]);
+
+            $mediaFile->profiles()->create([
+                'profile_id' => $session['profile_id'],
+                'name' => $session['profile_name'],
+                'qualities' => $session['profile_qualities'],
+            ]);
+        });
 
         Cache::forget($this->uploadCacheKey($validated['upload_id']));
 
@@ -239,12 +281,28 @@ class ManageController extends Controller
         return response()->json(['ok' => true]);
     }
 
+    private function resolveProfile(string $organizationId, string $profileId): Profile
+    {
+        return Profile::query()
+            ->where('organization_id', $organizationId)
+            ->findOr($profileId, fn () => abort(422, 'Selected profile is not available.'));
+    }
+
+    private function attachProfileSnapshot(MediaFile $mediaFile, Profile $profile): void
+    {
+        $mediaFile->profiles()->create([
+            'profile_id' => $profile->id,
+            'name' => $profile->name,
+            'qualities' => $profile->qualities,
+        ]);
+    }
+
     /**
-     * @return array{organization_id: string, user_id: int|string|null, folder_id: ?string, key: string, file_name: string}
+     * @return array{organization_id: string, user_id: int|string|null, folder_id: ?string, key: string, file_name: string, profile_id: string, profile_name: string, profile_qualities: array<int, string>}
      */
     private function authorizeUploadSession(Request $request, string $uploadId): array
     {
-        /** @var array{organization_id: string, user_id: int|string|null, folder_id: ?string, key: string, file_name: string}|null $session */
+        /** @var array{organization_id: string, user_id: int|string|null, folder_id: ?string, key: string, file_name: string, profile_id: string, profile_name: string, profile_qualities: array<int, string>}|null $session */
         $session = Cache::get($this->uploadCacheKey($uploadId));
 
         abort_if($session === null, 404, 'Upload session not found.');

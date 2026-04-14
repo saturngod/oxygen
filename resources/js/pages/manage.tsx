@@ -42,6 +42,13 @@ import {
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
+    Select,
+    SelectContent,
+    SelectItem,
+    SelectTrigger,
+    SelectValue,
+} from '@/components/ui/select';
+import {
     Table,
     TableBody,
     TableCell,
@@ -58,6 +65,12 @@ type FolderItem = {
 
 type FileStatus = 'uploaded' | 'progress' | 'success' | 'failed';
 
+type FileProfile = {
+    id: string;
+    name: string;
+    qualities: string[];
+};
+
 type FileItem = {
     id: string;
     title: string;
@@ -68,12 +81,21 @@ type FileItem = {
     tags: string[];
     size: number;
     created_at: string | null;
+    profiles: FileProfile[];
+};
+
+type ProfileOption = {
+    id: string;
+    name: string;
+    qualities: string[];
+    is_default: boolean;
 };
 
 type Props = {
     currentFolder: FolderItem | null;
     folders: FolderItem[];
     files: FileItem[];
+    profiles: ProfileOption[];
 };
 
 const statusStyles: Record<FileStatus, string> = {
@@ -124,20 +146,34 @@ type UploadState =
     | 'finalizing'
     | 'done';
 
-export default function Manage({ currentFolder, folders, files }: Props) {
+export default function Manage({
+    currentFolder,
+    folders,
+    files,
+    profiles,
+}: Props) {
+    const defaultProfileId =
+        profiles.find((profile) => profile.is_default)?.id ??
+        profiles[0]?.id ??
+        '';
+
     const [folderDialogOpen, setFolderDialogOpen] = useState(false);
     const [uploadDialogOpen, setUploadDialogOpen] = useState(false);
     const [fileToDelete, setFileToDelete] = useState<FileItem | null>(null);
+    const [fileDetails, setFileDetails] = useState<FileItem | null>(null);
     const [uploadTab, setUploadTab] = useState<'file' | 'url'>('file');
     const [tags, setTags] = useState<string[]>([]);
     const [tagInput, setTagInput] = useState('');
     const [selectedFile, setSelectedFile] = useState<File | null>(null);
     const [isDragging, setIsDragging] = useState(false);
     const [uploadTitle, setUploadTitle] = useState('');
+    const [selectedProfileId, setSelectedProfileId] =
+        useState<string>(defaultProfileId);
     const [uploadErrors, setUploadErrors] = useState<Record<string, string>>(
         {},
     );
     const fileInputRef = useRef<HTMLInputElement>(null);
+    const hasProfiles = profiles.length > 0;
 
     const [uploadState, setUploadState] = useState<UploadState>('idle');
     const [uploadProgress, setUploadProgress] = useState(0);
@@ -184,6 +220,7 @@ export default function Manage({ currentFolder, folders, files }: Props) {
         setTagInput('');
         setSelectedFile(null);
         setUploadTitle('');
+        setSelectedProfileId(defaultProfileId);
         setUploadErrors({});
         setUploadTab('file');
         setUploadState('idle');
@@ -273,6 +310,7 @@ export default function Manage({ currentFolder, folders, files }: Props) {
                 }>('/manage/files/multipart/init', {
                     file_name: selectedFile.name,
                     folder_id: currentFolder?.id ?? null,
+                    profile_id: selectedProfileId,
                 });
                 uploadIdRef.current = init.upload_id;
                 uploadKeyRef.current = init.key;
@@ -349,6 +387,10 @@ export default function Manage({ currentFolder, folders, files }: Props) {
         }
         if (!uploadTitle.trim()) {
             setUploadErrors({ title: 'Title is required.' });
+            return;
+        }
+        if (!selectedProfileId) {
+            setUploadErrors({ profile_id: 'Please select a profile.' });
             return;
         }
         uploadIdRef.current = null;
@@ -575,6 +617,66 @@ export default function Manage({ currentFolder, folders, files }: Props) {
                                         </div>
 
                                         <div className="grid gap-2">
+                                            <Label htmlFor="file-profile">
+                                                Encoding profile
+                                            </Label>
+                                            {hasProfiles ? (
+                                                <Select
+                                                    value={selectedProfileId}
+                                                    onValueChange={
+                                                        setSelectedProfileId
+                                                    }
+                                                >
+                                                    <SelectTrigger
+                                                        id="file-profile"
+                                                        className="w-full"
+                                                    >
+                                                        <SelectValue placeholder="Select a profile" />
+                                                    </SelectTrigger>
+                                                    <SelectContent>
+                                                        {profiles.map(
+                                                            (profile) => (
+                                                                <SelectItem
+                                                                    key={
+                                                                        profile.id
+                                                                    }
+                                                                    value={
+                                                                        profile.id
+                                                                    }
+                                                                >
+                                                                    <span>
+                                                                        {
+                                                                            profile.name
+                                                                        }
+                                                                    </span>
+                                                                    {profile.is_default && (
+                                                                        <Badge
+                                                                            variant="secondary"
+                                                                            className="ml-2"
+                                                                        >
+                                                                            Default
+                                                                        </Badge>
+                                                                    )}
+                                                                </SelectItem>
+                                                            ),
+                                                        )}
+                                                    </SelectContent>
+                                                </Select>
+                                            ) : (
+                                                <p className="rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground">
+                                                    No encoding profiles yet.
+                                                    Ask an admin to create one
+                                                    before uploading.
+                                                </p>
+                                            )}
+                                            <InputError
+                                                message={
+                                                    uploadErrors.profile_id
+                                                }
+                                            />
+                                        </div>
+
+                                        <div className="grid gap-2">
                                             <Label>File</Label>
                                             <div
                                                 role="button"
@@ -782,6 +884,7 @@ export default function Manage({ currentFolder, folders, files }: Props) {
                                                     <Button
                                                         type="submit"
                                                         disabled={
+                                                            !hasProfiles ||
                                                             uploadState ===
                                                                 'uploading' ||
                                                             uploadState ===
@@ -827,6 +930,11 @@ export default function Manage({ currentFolder, folders, files }: Props) {
                                                     name="tags"
                                                     value={JSON.stringify(tags)}
                                                 />
+                                                <input
+                                                    type="hidden"
+                                                    name="profile_id"
+                                                    value={selectedProfileId}
+                                                />
 
                                                 <div className="grid gap-2">
                                                     <Label htmlFor="url-title">
@@ -839,6 +947,70 @@ export default function Manage({ currentFolder, folders, files }: Props) {
                                                     />
                                                     <InputError
                                                         message={errors.title}
+                                                    />
+                                                </div>
+
+                                                <div className="grid gap-2">
+                                                    <Label htmlFor="url-profile">
+                                                        Encoding profile
+                                                    </Label>
+                                                    {hasProfiles ? (
+                                                        <Select
+                                                            value={
+                                                                selectedProfileId
+                                                            }
+                                                            onValueChange={
+                                                                setSelectedProfileId
+                                                            }
+                                                        >
+                                                            <SelectTrigger
+                                                                id="url-profile"
+                                                                className="w-full"
+                                                            >
+                                                                <SelectValue placeholder="Select a profile" />
+                                                            </SelectTrigger>
+                                                            <SelectContent>
+                                                                {profiles.map(
+                                                                    (
+                                                                        profile,
+                                                                    ) => (
+                                                                        <SelectItem
+                                                                            key={
+                                                                                profile.id
+                                                                            }
+                                                                            value={
+                                                                                profile.id
+                                                                            }
+                                                                        >
+                                                                            <span>
+                                                                                {
+                                                                                    profile.name
+                                                                                }
+                                                                            </span>
+                                                                            {profile.is_default && (
+                                                                                <Badge
+                                                                                    variant="secondary"
+                                                                                    className="ml-2"
+                                                                                >
+                                                                                    Default
+                                                                                </Badge>
+                                                                            )}
+                                                                        </SelectItem>
+                                                                    ),
+                                                                )}
+                                                            </SelectContent>
+                                                        </Select>
+                                                    ) : (
+                                                        <p className="rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground">
+                                                            No encoding profiles
+                                                            yet. Ask an admin to
+                                                            create one.
+                                                        </p>
+                                                    )}
+                                                    <InputError
+                                                        message={
+                                                            errors.profile_id
+                                                        }
                                                     />
                                                 </div>
 
@@ -933,7 +1105,10 @@ export default function Manage({ currentFolder, folders, files }: Props) {
                                                     </DialogClose>
                                                     <Button
                                                         type="submit"
-                                                        disabled={processing}
+                                                        disabled={
+                                                            processing ||
+                                                            !hasProfiles
+                                                        }
                                                     >
                                                         Add from URL
                                                     </Button>
@@ -982,6 +1157,7 @@ export default function Manage({ currentFolder, folders, files }: Props) {
                                     <TableHead>Title</TableHead>
                                     <TableHead>File name</TableHead>
                                     <TableHead>Status</TableHead>
+                                    <TableHead>Profiles</TableHead>
                                     <TableHead>Tags</TableHead>
                                     <TableHead className="w-20">Size</TableHead>
                                     <TableHead className="w-10">
@@ -991,7 +1167,11 @@ export default function Manage({ currentFolder, folders, files }: Props) {
                             </TableHeader>
                             <TableBody>
                                 {files.map((file) => (
-                                    <TableRow key={file.id}>
+                                    <TableRow
+                                        key={file.id}
+                                        onClick={() => setFileDetails(file)}
+                                        className="cursor-pointer"
+                                    >
                                         <TableCell className="font-medium">
                                             {file.title}
                                         </TableCell>
@@ -1009,6 +1189,29 @@ export default function Manage({ currentFolder, folders, files }: Props) {
                                             >
                                                 {statusLabel[file.status]}
                                             </Badge>
+                                        </TableCell>
+                                        <TableCell>
+                                            <div className="flex flex-wrap gap-1">
+                                                {file.profiles.length === 0 ? (
+                                                    <span className="text-xs text-muted-foreground">
+                                                        —
+                                                    </span>
+                                                ) : (
+                                                    file.profiles.map(
+                                                        (profile) => (
+                                                            <Badge
+                                                                key={profile.id}
+                                                                variant="secondary"
+                                                                title={profile.qualities.join(
+                                                                    ', ',
+                                                                )}
+                                                            >
+                                                                {profile.name}
+                                                            </Badge>
+                                                        ),
+                                                    )
+                                                )}
+                                            </div>
                                         </TableCell>
                                         <TableCell>
                                             <div className="flex flex-wrap gap-1">
@@ -1031,7 +1234,11 @@ export default function Manage({ currentFolder, folders, files }: Props) {
                                         <TableCell className="text-muted-foreground">
                                             {formatSize(file.size)}
                                         </TableCell>
-                                        <TableCell>
+                                        <TableCell
+                                            onClick={(event) =>
+                                                event.stopPropagation()
+                                            }
+                                        >
                                             <DropdownMenu>
                                                 <DropdownMenuTrigger asChild>
                                                     <Button
@@ -1088,7 +1295,7 @@ export default function Manage({ currentFolder, folders, files }: Props) {
                                 {files.length === 0 && (
                                     <TableRow>
                                         <TableCell
-                                            colSpan={6}
+                                            colSpan={7}
                                             className="h-24 text-center text-sm text-muted-foreground"
                                         >
                                             No files yet. Upload a video to get
@@ -1101,6 +1308,160 @@ export default function Manage({ currentFolder, folders, files }: Props) {
                     </div>
                 </div>
             </div>
+
+            <Dialog
+                open={fileDetails !== null}
+                onOpenChange={(open) => {
+                    if (!open) {
+                        setFileDetails(null);
+                    }
+                }}
+            >
+                <DialogContent className="sm:max-w-lg">
+                    <DialogHeader>
+                        <DialogTitle>
+                            {fileDetails?.title ?? 'Media'}
+                        </DialogTitle>
+                        <DialogDescription>
+                            {fileDetails?.file_name ??
+                                fileDetails?.source_url ??
+                                '—'}
+                        </DialogDescription>
+                    </DialogHeader>
+
+                    {fileDetails && (
+                        <div className="space-y-4">
+                            <div className="grid grid-cols-[8rem_1fr] gap-x-4 gap-y-2">
+                                <span className="text-xs text-muted-foreground">
+                                    Status
+                                </span>
+                                <div>
+                                    <Badge
+                                        variant="secondary"
+                                        className={statusStyles[fileDetails.status]}
+                                    >
+                                        {statusLabel[fileDetails.status]}
+                                    </Badge>
+                                </div>
+
+                                <span className="text-xs text-muted-foreground">
+                                    Size
+                                </span>
+                                <span className="text-xs">
+                                    {formatSize(fileDetails.size)}
+                                </span>
+
+                                <span className="text-xs text-muted-foreground">
+                                    Tags
+                                </span>
+                                <div className="flex flex-wrap gap-1">
+                                    {fileDetails.tags.length === 0 ? (
+                                        <span className="text-xs text-muted-foreground">
+                                            —
+                                        </span>
+                                    ) : (
+                                        fileDetails.tags.map((tag) => (
+                                            <Badge
+                                                key={tag}
+                                                variant="outline"
+                                            >
+                                                {tag}
+                                            </Badge>
+                                        ))
+                                    )}
+                                </div>
+
+                                <span className="text-xs text-muted-foreground">
+                                    Streaming URL
+                                </span>
+                                <div className="min-w-0">
+                                    {fileDetails.streaming_url ? (
+                                        <div className="flex items-center gap-2">
+                                            <a
+                                                href={fileDetails.streaming_url}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="truncate text-xs text-primary underline underline-offset-2"
+                                            >
+                                                {fileDetails.streaming_url}
+                                            </a>
+                                            <Button
+                                                type="button"
+                                                variant="ghost"
+                                                size="icon-sm"
+                                                aria-label="Copy streaming URL"
+                                                onClick={() =>
+                                                    navigator.clipboard.writeText(
+                                                        fileDetails.streaming_url!,
+                                                    )
+                                                }
+                                            >
+                                                <LinkIcon className="size-3.5" />
+                                            </Button>
+                                        </div>
+                                    ) : (
+                                        <span className="text-xs text-muted-foreground">
+                                            Not ready yet
+                                        </span>
+                                    )}
+                                </div>
+                            </div>
+
+                            <div className="space-y-2">
+                                <h3 className="text-xs font-medium text-muted-foreground">
+                                    Transcode profiles
+                                </h3>
+                                {fileDetails.profiles.length === 0 ? (
+                                    <p className="rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground">
+                                        No profile recorded for this upload.
+                                    </p>
+                                ) : (
+                                    <div className="space-y-2">
+                                        {fileDetails.profiles.map((profile) => (
+                                            <div
+                                                key={profile.id}
+                                                className="rounded-md border bg-card px-3 py-2"
+                                            >
+                                                <div className="flex items-center justify-between gap-2">
+                                                    <span className="text-xs font-medium">
+                                                        {profile.name}
+                                                    </span>
+                                                    <span className="text-[10px] text-muted-foreground">
+                                                        {profile.qualities.length}{' '}
+                                                        rendition
+                                                        {profile.qualities
+                                                            .length === 1
+                                                            ? ''
+                                                            : 's'}
+                                                    </span>
+                                                </div>
+                                                <div className="mt-2 flex flex-wrap gap-1">
+                                                    {profile.qualities.map(
+                                                        (quality) => (
+                                                            <Badge
+                                                                key={quality}
+                                                                variant="secondary"
+                                                            >
+                                                                {quality}
+                                                            </Badge>
+                                                        ),
+                                                    )}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
+
+                    <DialogFooter>
+                        <DialogClose asChild>
+                            <Button variant="secondary">Close</Button>
+                        </DialogClose>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
 
             <Dialog
                 open={fileToDelete !== null}
