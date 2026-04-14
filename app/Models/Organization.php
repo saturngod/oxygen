@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Facades\Storage;
 
 #[Fillable(['name', 'slug', 'image', 'contact_email', 'phone', 'address'])]
@@ -22,6 +23,11 @@ class Organization extends Model
         return $this->belongsToMany(User::class)
             ->withPivot('role')
             ->withTimestamps();
+    }
+
+    public function profiles(): HasMany
+    {
+        return $this->hasMany(Profile::class);
     }
 
     public function hasUserWithRole(User $user, OrganizationRole $role): bool

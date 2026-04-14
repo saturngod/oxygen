@@ -5,6 +5,7 @@ import {
     FolderKanban,
     LayoutGrid,
     Settings,
+    SlidersHorizontal,
     Users,
 } from 'lucide-react';
 import { usePage } from '@inertiajs/react';
@@ -21,6 +22,7 @@ import {
     SidebarMenuItem,
 } from '@/components/ui/sidebar';
 import { dashboard, manage, status } from '@/routes';
+import { index as indexOrgProfiles } from '@/routes/admin/organizations/profiles';
 import { edit as editOrgSettings } from '@/routes/admin/organizations/settings';
 import { index as indexOrgUsers } from '@/routes/admin/organizations/users';
 import type { NavItem, SharedData } from '@/types';
@@ -68,6 +70,11 @@ export function AppSidebar() {
                       title: 'Users',
                       href: indexOrgUsers({ organization: orgId }),
                       icon: Users,
+                  },
+                  {
+                      title: 'Profiles',
+                      href: indexOrgProfiles({ organization: orgId }),
+                      icon: SlidersHorizontal,
                   },
                   {
                       title: 'Settings',
