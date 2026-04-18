@@ -51,6 +51,24 @@ test('index lists folders and root-level files', function () {
     expect($rootFile->fresh())->not->toBeNull();
 });
 
+test('index exposes transcoding progress for in-progress files', function () {
+    [$user, $org] = manageActor();
+
+    MediaFile::factory()->for($org)->create([
+        'title' => 'Encoding now',
+        'status' => MediaFileStatus::Progress,
+        'progress' => 42,
+    ]);
+
+    $this->actingAs($user)
+        ->withSession(['current_organization_id' => $org->getKey()])
+        ->get('/manage')
+        ->assertInertia(fn ($page) => $page
+            ->where('files.0.status', 'progress')
+            ->where('files.0.progress', 42)
+        );
+});
+
 test('index scopes files to the selected folder', function () {
     [$user, $org, $profile] = manageActor();
     $folder = Folder::factory()->for($org)->create(['name' => 'Campaigns']);

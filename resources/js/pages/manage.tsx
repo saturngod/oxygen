@@ -78,6 +78,7 @@ type FileItem = {
     source_url: string | null;
     streaming_url: string | null;
     status: FileStatus;
+    progress: number;
     tags: string[];
     size: number;
     created_at: string | null;
@@ -1181,14 +1182,29 @@ export default function Manage({
                                                 '—'}
                                         </TableCell>
                                         <TableCell>
-                                            <Badge
-                                                variant="secondary"
-                                                className={
-                                                    statusStyles[file.status]
-                                                }
-                                            >
-                                                {statusLabel[file.status]}
-                                            </Badge>
+                                            <div className="flex flex-col gap-1">
+                                                <Badge
+                                                    variant="secondary"
+                                                    className={
+                                                        statusStyles[file.status]
+                                                    }
+                                                >
+                                                    {statusLabel[file.status]}
+                                                    {file.status ===
+                                                        'progress' &&
+                                                        ` · ${file.progress}%`}
+                                                </Badge>
+                                                {file.status === 'progress' && (
+                                                    <div className="h-1 w-20 overflow-hidden rounded-full bg-muted">
+                                                        <div
+                                                            className="h-full bg-primary transition-all"
+                                                            style={{
+                                                                width: `${file.progress}%`,
+                                                            }}
+                                                        />
+                                                    </div>
+                                                )}
+                                            </div>
                                         </TableCell>
                                         <TableCell>
                                             <div className="flex flex-wrap gap-1">
@@ -1335,13 +1351,25 @@ export default function Manage({
                                 <span className="text-xs text-muted-foreground">
                                     Status
                                 </span>
-                                <div>
+                                <div className="space-y-1.5">
                                     <Badge
                                         variant="secondary"
                                         className={statusStyles[fileDetails.status]}
                                     >
                                         {statusLabel[fileDetails.status]}
+                                        {fileDetails.status === 'progress' &&
+                                            ` · ${fileDetails.progress}%`}
                                     </Badge>
+                                    {fileDetails.status === 'progress' && (
+                                        <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                                            <div
+                                                className="h-full bg-primary transition-all"
+                                                style={{
+                                                    width: `${fileDetails.progress}%`,
+                                                }}
+                                            />
+                                        </div>
+                                    )}
                                 </div>
 
                                 <span className="text-xs text-muted-foreground">

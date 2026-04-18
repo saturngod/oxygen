@@ -1,7 +1,7 @@
 {
   "permissions": {
     "allow": [
-      "Bash(ls -la /Users/bonjoy/Downloads/transcoder/MyanVideoTranscoder/.env*)",
+      "Bash(ls -la /Users/bonjoy/Downloads/transcoder/oxygen/.env*)",
       "Bash(php artisan:*)",
       "Bash(ALLOW_REGISTER=false php artisan route:list --path=register)",
       "Bash(vendor/bin/pint --dirty --format agent)",
@@ -11,7 +11,8 @@
       "Bash(composer require:*)",
       "Bash(python3 -c 'import json,sys; d=json.load\\(sys.stdin\\); print\\([k for k in d.keys\\(\\) if \"manage\" in k]\\)')",
       "Bash(python3:*)",
-      "Bash(npm run:*)"
+      "Bash(npm run:*)",
+      "Bash(go build *)"
     ]
   },
   "enableAllProjectMcpServers": true,

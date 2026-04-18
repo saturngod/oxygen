@@ -12,7 +12,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Facades\Storage;
 
-#[Fillable(['organization_id', 'folder_id', 'title', 'file_name', 'file_path', 'source_url', 'streaming_url', 'size', 'status', 'tags'])]
+#[Fillable(['organization_id', 'folder_id', 'title', 'file_name', 'file_path', 'source_url', 'streaming_url', 'size', 'status', 'progress', 'tags'])]
 class MediaFile extends Model
 {
     /** @use HasFactory<MediaFileFactory> */
@@ -25,6 +25,7 @@ class MediaFile extends Model
     {
         return [
             'status' => MediaFileStatus::class,
+            'progress' => 'integer',
             'tags' => 'array',
         ];
     }

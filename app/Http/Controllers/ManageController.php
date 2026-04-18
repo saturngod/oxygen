@@ -14,6 +14,7 @@ use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Inertia\Inertia;
@@ -56,6 +57,7 @@ class ManageController extends Controller
                 'source_url' => $file->source_url,
                 'streaming_url' => $file->streaming_url,
                 'status' => $file->status->value,
+                'progress' => $file->progress,
                 'tags' => $file->tags ?? [],
                 'size' => $file->size,
                 'created_at' => $file->created_at?->toIso8601String(),
@@ -147,6 +149,7 @@ class ManageController extends Controller
             ]);
 
             $this->attachProfileSnapshot($mediaFile, $profile);
+            $this->dispatchTranscodeJob($mediaFile);
         });
 
         return back()->with('toast', ['type' => 'success', 'message' => __('Video queued from URL.')]);
@@ -238,7 +241,7 @@ class ManageController extends Controller
             $size = 0;
         }
 
-        DB::transaction(function () use ($session, $validated, $size): void {
+        $mediaFile = DB::transaction(function () use ($session, $validated, $size): MediaFile {
             $mediaFile = MediaFile::create([
                 'organization_id' => $session['organization_id'],
                 'folder_id' => $session['folder_id'],
@@ -255,7 +258,11 @@ class ManageController extends Controller
                 'name' => $session['profile_name'],
                 'qualities' => $session['profile_qualities'],
             ]);
+
+            return $mediaFile;
         });
+
+        $this->dispatchTranscodeJob($mediaFile);
 
         Cache::forget($this->uploadCacheKey($validated['upload_id']));
 
@@ -328,5 +335,24 @@ class ManageController extends Controller
         abort_if($id === null, 403, 'No active organization.');
 
         return (string) $id;
+    }
+
+    private function dispatchTranscodeJob(MediaFile $mediaFile): void
+    {
+        Redis::lpush('queues:transcode', json_encode([
+            'id' => $mediaFile->id,
+            'organization_id' => $mediaFile->organization_id,
+            'folder_id' => $mediaFile->folder_id,
+            'title' => $mediaFile->title,
+            'file_name' => $mediaFile->file_name,
+            'file_path' => $mediaFile->file_path,
+            'source_url' => $mediaFile->source_url,
+            'streaming_url' => $mediaFile->streaming_url,
+            'size' => $mediaFile->size,
+            'status' => $mediaFile->status->value,
+            'progress' => $mediaFile->progress,
+            'created_at' => $mediaFile->created_at?->toIso8601String(),
+            'updated_at' => $mediaFile->updated_at?->toIso8601String(),
+        ]));
     }
 }
