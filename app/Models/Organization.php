@@ -30,6 +30,11 @@ class Organization extends Model
         return $this->hasMany(Profile::class);
     }
 
+    public function webhooks(): HasMany
+    {
+        return $this->hasMany(Webhook::class);
+    }
+
     public function hasUserWithRole(User $user, OrganizationRole $role): bool
     {
         return $this->users()

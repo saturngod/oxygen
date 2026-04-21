@@ -5,6 +5,7 @@ import {
     Settings,
     SlidersHorizontal,
     Users,
+    Webhook,
 } from 'lucide-react';
 import { NavFooter } from '@/components/nav-footer';
 import { NavMain } from '@/components/nav-main';
@@ -22,6 +23,7 @@ import { manage, status } from '@/routes';
 import { index as indexOrgProfiles } from '@/routes/admin/organizations/profiles';
 import { edit as editOrgSettings } from '@/routes/admin/organizations/settings';
 import { index as indexOrgUsers } from '@/routes/admin/organizations/users';
+import { index as indexOrgWebhooks } from '@/routes/admin/organizations/webhooks';
 import type { NavItem, SharedData } from '@/types';
 
 const mainNavItems: NavItem[] = [
@@ -56,6 +58,11 @@ export function AppSidebar() {
                       title: 'Profiles',
                       href: indexOrgProfiles({ organization: orgId }),
                       icon: SlidersHorizontal,
+                  },
+                  {
+                      title: 'Webhooks',
+                      href: indexOrgWebhooks({ organization: orgId }),
+                      icon: Webhook,
                   },
                   {
                       title: 'Settings',

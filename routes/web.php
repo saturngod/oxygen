@@ -3,6 +3,7 @@
 use App\Http\Controllers\Admin\OrganizationProfilesController;
 use App\Http\Controllers\Admin\OrganizationSettingsController;
 use App\Http\Controllers\Admin\OrganizationUsersController;
+use App\Http\Controllers\Admin\OrganizationWebhooksController;
 use App\Http\Controllers\ManageController;
 use App\Http\Controllers\OrganizationSwitchController;
 use App\Http\Controllers\StatusController;
@@ -39,6 +40,10 @@ Route::middleware(['auth', 'verified'])->group(function () {
         Route::get('profiles/{profile}/edit', [OrganizationProfilesController::class, 'edit'])->name('admin.organizations.profiles.edit');
         Route::put('profiles/{profile}', [OrganizationProfilesController::class, 'update'])->name('admin.organizations.profiles.update');
         Route::put('profiles/{profile}/default', [OrganizationProfilesController::class, 'makeDefault'])->name('admin.organizations.profiles.default');
+        Route::get('webhooks', [OrganizationWebhooksController::class, 'index'])->name('admin.organizations.webhooks.index');
+        Route::post('webhooks', [OrganizationWebhooksController::class, 'store'])->name('admin.organizations.webhooks.store');
+        Route::put('webhooks/{webhook}', [OrganizationWebhooksController::class, 'update'])->name('admin.organizations.webhooks.update');
+        Route::delete('webhooks/{webhook}', [OrganizationWebhooksController::class, 'destroy'])->name('admin.organizations.webhooks.destroy');
     });
 });
 

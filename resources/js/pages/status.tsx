@@ -130,15 +130,7 @@ function ProgressCell({ file }: { file: FileItem }) {
         );
     }
 
-    if (file.status === 'failed') {
-        return (
-            <span className="text-xs text-red-600 dark:text-red-400">
-                Failed
-            </span>
-        );
-    }
-
-    return <span className="text-xs text-muted-foreground">Pending</span>;
+    return <span className="text-xs text-muted-foreground">—</span>;
 }
 
 export default function Status({ files }: Props) {
@@ -194,7 +186,7 @@ export default function Status({ files }: Props) {
                 )}
 
                 {files.length === 0 ? (
-                    <div className="flex flex-1 flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-sidebar-border/70 p-12 text-center">
+                    <div className="flex flex-1 flex-col items-center justify-center gap-3 rounded-lg border border-dashed p-12 text-center">
                         <Video className="size-10 text-muted-foreground/50" />
                         <p className="text-sm text-muted-foreground">
                             No videos yet. Upload a video to see its transcode
@@ -202,7 +194,7 @@ export default function Status({ files }: Props) {
                         </p>
                     </div>
                 ) : (
-                    <div className="relative flex-1 overflow-hidden rounded-xl border border-sidebar-border/70 dark:border-sidebar-border">
+                    <div className="relative flex-1 overflow-hidden rounded-lg border">
                         <Table>
                             <TableHeader>
                                 <TableRow>
@@ -310,22 +302,24 @@ export default function Status({ files }: Props) {
                                 <div className="space-y-1.5">
                                     <Badge
                                         variant="secondary"
-                                        className={
-                                            statusStyles[fileDetails.status]
-                                        }
+                                        className={`gap-1 ${statusStyles[fileDetails.status]}`}
                                     >
+                                        {statusIcons[fileDetails.status]}
                                         {statusLabel[fileDetails.status]}
-                                        {fileDetails.status === 'progress' &&
-                                            ` · ${fileDetails.progress}%`}
                                     </Badge>
                                     {fileDetails.status === 'progress' && (
-                                        <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
-                                            <div
-                                                className="h-full bg-primary transition-all"
-                                                style={{
-                                                    width: `${fileDetails.progress}%`,
-                                                }}
-                                            />
+                                        <div className="flex items-center gap-2">
+                                            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
+                                                <div
+                                                    className="h-full bg-amber-500 transition-all"
+                                                    style={{
+                                                        width: `${fileDetails.progress}%`,
+                                                    }}
+                                                />
+                                            </div>
+                                            <span className="text-[10px] text-muted-foreground tabular-nums">
+                                                {fileDetails.progress}%
+                                            </span>
                                         </div>
                                     )}
                                 </div>
@@ -354,10 +348,7 @@ export default function Status({ files }: Props) {
                                         </span>
                                     ) : (
                                         fileDetails.tags.map((tag) => (
-                                            <Badge
-                                                key={tag}
-                                                variant="outline"
-                                            >
+                                            <Badge key={tag} variant="outline">
                                                 {tag}
                                             </Badge>
                                         ))
@@ -371,9 +362,7 @@ export default function Status({ files }: Props) {
                                     {fileDetails.streaming_url ? (
                                         <div className="flex items-center gap-2">
                                             <a
-                                                href={
-                                                    fileDetails.streaming_url
-                                                }
+                                                href={fileDetails.streaming_url}
                                                 target="_blank"
                                                 rel="noopener noreferrer"
                                                 className="truncate text-xs text-primary underline underline-offset-2"
@@ -412,46 +401,41 @@ export default function Status({ files }: Props) {
                                     </p>
                                 ) : (
                                     <div className="space-y-2">
-                                        {fileDetails.profiles.map(
-                                            (profile) => (
-                                                <div
-                                                    key={profile.id}
-                                                    className="rounded-md border bg-card px-3 py-2"
-                                                >
-                                                    <div className="flex items-center justify-between gap-2">
-                                                        <span className="text-xs font-medium">
-                                                            {profile.name}
-                                                        </span>
-                                                        <span className="text-[10px] text-muted-foreground">
-                                                            {
-                                                                profile
-                                                                    .qualities
-                                                                    .length
-                                                            }{' '}
-                                                            rendition
-                                                            {profile.qualities
-                                                                .length === 1
-                                                                ? ''
-                                                                : 's'}
-                                                        </span>
-                                                    </div>
-                                                    <div className="mt-2 flex flex-wrap gap-1">
-                                                        {profile.qualities.map(
-                                                            (quality) => (
-                                                                <Badge
-                                                                    key={
-                                                                        quality
-                                                                    }
-                                                                    variant="secondary"
-                                                                >
-                                                                    {quality}
-                                                                </Badge>
-                                                            ),
-                                                        )}
-                                                    </div>
+                                        {fileDetails.profiles.map((profile) => (
+                                            <div
+                                                key={profile.id}
+                                                className="rounded-md border bg-card px-3 py-2"
+                                            >
+                                                <div className="flex items-center justify-between gap-2">
+                                                    <span className="text-xs font-medium">
+                                                        {profile.name}
+                                                    </span>
+                                                    <span className="text-[10px] text-muted-foreground">
+                                                        {
+                                                            profile.qualities
+                                                                .length
+                                                        }{' '}
+                                                        rendition
+                                                        {profile.qualities
+                                                            .length === 1
+                                                            ? ''
+                                                            : 's'}
+                                                    </span>
                                                 </div>
-                                            ),
-                                        )}
+                                                <div className="mt-2 flex flex-wrap gap-1">
+                                                    {profile.qualities.map(
+                                                        (quality) => (
+                                                            <Badge
+                                                                key={quality}
+                                                                variant="secondary"
+                                                            >
+                                                                {quality}
+                                                            </Badge>
+                                                        ),
+                                                    )}
+                                                </div>
+                                            </div>
+                                        ))}
                                     </div>
                                 )}
                             </div>
