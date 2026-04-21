@@ -1,14 +1,11 @@
+import { usePage } from '@inertiajs/react';
 import {
     Activity,
-    BookOpen,
-    FolderGit2,
     FolderKanban,
-    LayoutGrid,
     Settings,
     SlidersHorizontal,
     Users,
 } from 'lucide-react';
-import { usePage } from '@inertiajs/react';
 import { NavFooter } from '@/components/nav-footer';
 import { NavMain } from '@/components/nav-main';
 import { NavUser } from '@/components/nav-user';
@@ -21,18 +18,13 @@ import {
     SidebarMenu,
     SidebarMenuItem,
 } from '@/components/ui/sidebar';
-import { dashboard, manage, status } from '@/routes';
+import { manage, status } from '@/routes';
 import { index as indexOrgProfiles } from '@/routes/admin/organizations/profiles';
 import { edit as editOrgSettings } from '@/routes/admin/organizations/settings';
 import { index as indexOrgUsers } from '@/routes/admin/organizations/users';
 import type { NavItem, SharedData } from '@/types';
 
 const mainNavItems: NavItem[] = [
-    {
-        title: 'Dashboard',
-        href: dashboard(),
-        icon: LayoutGrid,
-    },
     {
         title: 'Manage',
         href: manage(),
@@ -45,18 +37,7 @@ const mainNavItems: NavItem[] = [
     },
 ];
 
-const footerNavItems: NavItem[] = [
-    {
-        title: 'Repository',
-        href: 'https://github.com/laravel/react-starter-kit',
-        icon: FolderGit2,
-    },
-    {
-        title: 'Documentation',
-        href: 'https://laravel.com/docs/starter-kits#react',
-        icon: BookOpen,
-    },
-];
+const footerNavItems: NavItem[] = [];
 
 export function AppSidebar() {
     const { auth } = usePage<SharedData>().props;

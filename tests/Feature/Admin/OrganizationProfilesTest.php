@@ -204,3 +204,79 @@ test('operator cannot create a profile', function () {
         ])
         ->assertForbidden();
 });
+
+test('admin can view profile edit page', function () {
+    $user = User::factory()->create(['email_verified_at' => now()]);
+    $org = Organization::factory()->create();
+
+    $org->users()->attach($user, ['role' => OrganizationRole::Admin->value]);
+
+    $profile = Profile::factory()->for($org)->create(['name' => 'Test Profile']);
+
+    $this->actingAs($user)
+        ->get(route('admin.organizations.profiles.edit', [$org, $profile]))
+        ->assertSuccessful();
+});
+
+test('admin can update a profile name and qualities', function () {
+    $user = User::factory()->create(['email_verified_at' => now()]);
+    $org = Organization::factory()->create();
+
+    $org->users()->attach($user, ['role' => OrganizationRole::Admin->value]);
+
+    $profile = Profile::factory()->for($org)->create([
+        'name' => 'Old Name',
+        'qualities' => [VideoQuality::Hd720p->value],
+    ]);
+
+    $payload = [
+        'name' => 'Updated Name',
+        'qualities' => [VideoQuality::Hd720p->value, VideoQuality::Hd1080p->value],
+    ];
+
+    $this->actingAs($user)
+        ->put(route('admin.organizations.profiles.update', [$org, $profile]), $payload)
+        ->assertRedirect(route('admin.organizations.profiles.index', $org));
+
+    $profile->refresh();
+
+    expect($profile->name)->toBe('Updated Name')
+        ->and($profile->qualities)->toEqualCanonicalizing($payload['qualities']);
+});
+
+test('update is scoped to the organization', function () {
+    $user = User::factory()->create(['email_verified_at' => now()]);
+    $org = Organization::factory()->create();
+    $otherOrg = Organization::factory()->create();
+
+    $org->users()->attach($user, ['role' => OrganizationRole::Admin->value]);
+
+    $foreign = Profile::factory()->for($otherOrg)->create(['name' => 'Foreign']);
+
+    $this->actingAs($user)
+        ->put(route('admin.organizations.profiles.update', [$org, $foreign]), [
+            'name' => 'Hacked',
+            'qualities' => [VideoQuality::Hd720p->value],
+        ])
+        ->assertNotFound();
+
+    expect($foreign->refresh()->name)->toBe('Foreign');
+});
+
+test('operator cannot update a profile', function () {
+    $user = User::factory()->create(['email_verified_at' => now()]);
+    $org = Organization::factory()->create();
+
+    $org->users()->attach($user, ['role' => OrganizationRole::Operator->value]);
+
+    $profile = Profile::factory()->for($org)->create(['name' => 'Protected']);
+
+    $this->actingAs($user)
+        ->put(route('admin.organizations.profiles.update', [$org, $profile]), [
+            'name' => 'Changed',
+            'qualities' => [VideoQuality::Hd720p->value],
+        ])
+        ->assertForbidden();
+
+    expect($profile->refresh()->name)->toBe('Protected');
+});

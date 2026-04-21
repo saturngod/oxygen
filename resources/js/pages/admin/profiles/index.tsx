@@ -1,11 +1,11 @@
 import { Head, router, setLayoutProps } from '@inertiajs/react';
-import { CheckCircle2, Plus, Star } from 'lucide-react';
+import { CheckCircle2, Pencil, Plus, Star } from 'lucide-react';
 import { useState } from 'react';
 import OrganizationProfilesController from '@/actions/App/Http/Controllers/Admin/OrganizationProfilesController';
+import { ControlFilter } from '@/components/control-filter';
 import Heading from '@/components/heading';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { ControlFilter } from '@/components/control-filter';
 import {
     Dialog,
     DialogClose,
@@ -25,6 +25,7 @@ import {
 } from '@/components/ui/table';
 import {
     create as createOrgProfile,
+    edit as editOrgProfile,
     index as indexOrgProfiles,
 } from '@/routes/admin/organizations/profiles';
 
@@ -167,18 +168,37 @@ export default function OrganizationProfiles({
                                         ).toLocaleDateString()}
                                     </TableCell>
                                     <TableCell className="text-right">
-                                        {!profile.is_default && (
+                                        <div className="flex items-center justify-end gap-2">
                                             <Button
-                                                variant="outline"
+                                                variant="ghost"
                                                 size="sm"
                                                 onClick={() =>
-                                                    setPendingDefault(profile)
+                                                    router.visit(
+                                                        editOrgProfile({
+                                                            organization:
+                                                                organization.id,
+                                                            profile: profile.id,
+                                                        }),
+                                                    )
                                                 }
                                             >
-                                                <Star className="size-3.5" />
-                                                Make default
+                                                <Pencil className="size-3.5" />
                                             </Button>
-                                        )}
+                                            {!profile.is_default && (
+                                                <Button
+                                                    variant="outline"
+                                                    size="sm"
+                                                    onClick={() =>
+                                                        setPendingDefault(
+                                                            profile,
+                                                        )
+                                                    }
+                                                >
+                                                    <Star className="size-3.5" />
+                                                    Make default
+                                                </Button>
+                                            )}
+                                        </div>
                                     </TableCell>
                                 </TableRow>
                             ))}

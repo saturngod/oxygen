@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Admin;
 use App\Enums\VideoQuality;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Admin\StoreProfileRequest;
+use App\Http\Requests\Admin\UpdateProfileRequest;
 use App\Models\Organization;
 use App\Models\Profile;
 use Illuminate\Http\RedirectResponse;
@@ -63,6 +64,39 @@ class OrganizationProfilesController extends Controller
 
         return to_route('admin.organizations.profiles.index', $organization)
             ->with('toast', ['type' => 'success', 'message' => __('Profile created.')]);
+    }
+
+    public function edit(Organization $organization, Profile $profile): Response
+    {
+        $this->authorize('manage', $organization);
+
+        abort_unless($profile->organization_id === $organization->id, 404);
+
+        return Inertia::render('admin/profiles/edit', [
+            'organization' => [
+                'id' => $organization->id,
+                'name' => $organization->name,
+            ],
+            'profile' => [
+                'id' => $profile->id,
+                'name' => $profile->name,
+                'qualities' => $profile->qualities,
+                'is_default' => $profile->is_default,
+            ],
+            'qualities' => VideoQuality::catalog(),
+        ]);
+    }
+
+    public function update(UpdateProfileRequest $request, Organization $organization, Profile $profile): RedirectResponse
+    {
+        $this->authorize('manage', $organization);
+
+        abort_unless($profile->organization_id === $organization->id, 404);
+
+        $profile->update($request->validated());
+
+        return to_route('admin.organizations.profiles.index', $organization)
+            ->with('toast', ['type' => 'success', 'message' => __('Profile updated.')]);
     }
 
     public function makeDefault(Organization $organization, Profile $profile): RedirectResponse

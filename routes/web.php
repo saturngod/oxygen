@@ -5,22 +5,18 @@ use App\Http\Controllers\Admin\OrganizationSettingsController;
 use App\Http\Controllers\Admin\OrganizationUsersController;
 use App\Http\Controllers\ManageController;
 use App\Http\Controllers\OrganizationSwitchController;
+use App\Http\Controllers\StatusController;
 use App\Http\Middleware\EnsureOrganizationAdmin;
 use App\Http\Middleware\EnsureOrganizationMember;
 use Illuminate\Support\Facades\Route;
-use Laravel\Fortify\Features;
 
-Route::inertia('/', 'welcome', [
-    'canRegister' => Features::enabled(Features::registration()),
-])->name('home');
+Route::redirect('/', '/manage');
 
 Route::middleware(['auth', 'verified'])->group(function () {
     Route::put('organizations/{organization}/switch', OrganizationSwitchController::class)
         ->name('organizations.switch');
 
     Route::middleware(EnsureOrganizationMember::class)->group(function () {
-        Route::inertia('dashboard', 'dashboard')->name('dashboard');
-
         Route::get('manage', [ManageController::class, 'index'])->name('manage');
         Route::post('manage/folders', [ManageController::class, 'storeFolder'])->name('manage.folders.store');
         Route::post('manage/files/url', [ManageController::class, 'storeFromUrl'])->name('manage.files.url');
@@ -30,7 +26,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
         Route::post('manage/files/multipart/complete', [ManageController::class, 'completeMultipartUpload'])->name('manage.files.multipart.complete');
         Route::post('manage/files/multipart/abort', [ManageController::class, 'abortMultipartUpload'])->name('manage.files.multipart.abort');
 
-        Route::inertia('status', 'status')->name('status');
+        Route::get('status', StatusController::class)->name('status');
     });
 
     Route::prefix('admin/organizations/{organization}')->middleware(EnsureOrganizationAdmin::class)->group(function () {
@@ -40,6 +36,8 @@ Route::middleware(['auth', 'verified'])->group(function () {
         Route::get('profiles', [OrganizationProfilesController::class, 'index'])->name('admin.organizations.profiles.index');
         Route::get('profiles/create', [OrganizationProfilesController::class, 'create'])->name('admin.organizations.profiles.create');
         Route::post('profiles', [OrganizationProfilesController::class, 'store'])->name('admin.organizations.profiles.store');
+        Route::get('profiles/{profile}/edit', [OrganizationProfilesController::class, 'edit'])->name('admin.organizations.profiles.edit');
+        Route::put('profiles/{profile}', [OrganizationProfilesController::class, 'update'])->name('admin.organizations.profiles.update');
         Route::put('profiles/{profile}/default', [OrganizationProfilesController::class, 'makeDefault'])->name('admin.organizations.profiles.default');
     });
 });

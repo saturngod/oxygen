@@ -1,67 +1,100 @@
-# golang-queue — Claude guide
+# golang-queue — Agent Guide
 
-This directory is a standalone Go worker that transcodes uploaded videos into HLS renditions. It is **not** part of the Laravel app's PHP runtime — it talks to the same Postgres database and Redis instance, but ships and deploys as its own binary.
+Standalone Go worker that consumes video transcode jobs from Redis, transcodes via ffmpeg into multi-bitrate HLS, uploads to S3, and writes progress to the shared Postgres database. Ships as its own binary — not part of the Laravel PHP runtime.
 
-Keep this file tight. If you need more detail on a decision, see `PLAN.md` (system design).
+For system design, see `PLAN.md`. For the Laravel app's media upload flow and S3 multipart endpoints, see the parent `AGENTS.md`.
 
-## What the worker does
-
-1. Blocks on a Redis list (`BRPOP`) waiting for transcode jobs pushed by the Laravel app.
-2. Loads the `media_files` row + its `media_file_profiles` row (qualities JSON) from Postgres.
-3. Downloads the source from S3 to a temp working directory.
-4. Runs `ffmpeg` once, emitting every rendition in the profile **plus** a master `main.m3u8` that references them.
-5. Parses ffmpeg's `-progress pipe:1` stream and writes `media_files.progress` (0–100) + `status` back to Postgres every few seconds.
-6. Uploads the HLS output tree back to S3, sets `media_files.streaming_url`, flips status to `success` (or `failed` on error), and cleans up the temp dir.
-
-## Non-negotiables
-
-- **Source of truth for renditions is `App\Enums\VideoQuality`** in the Laravel app (`app/Enums/VideoQuality.php`). The Go worker must keep a mirrored table of `value → {width, height, bitrate_kbps}` and must match it exactly. If the PHP enum changes, update the Go map in the same PR — do not diverge.
-- **Status values must match `App\Enums\MediaFileStatus`**: `uploaded`, `progress`, `success`, `failed`. Do not invent new ones.
-- **`media_files.progress` is `unsignedTinyInteger` (0–255 in PG, but semantically 0–100).** Never write >100. Clamp before updating.
-- **Organization isolation.** Every query must filter by `organization_id` from the job payload. Do not trust the DB row alone — cross-check that the job's org matches the row's org before doing work.
-- **The worker never mutates user-facing tables other than `media_files`** (status, progress, streaming_url, file_path if needed). Profiles, folders, organizations are read-only from Go.
-- **ffmpeg is invoked as a subprocess.** Do not pull in cgo bindings. Shell out, stream stdout/stderr, kill on context cancel.
-- **One ffmpeg invocation per job.** Use a single command with multiple `-map` outputs to produce all renditions + the master playlist in one pass. Do not loop per-bitrate — that re-decodes the source N times.
-- **Idempotent-ish.** If a job is redelivered after a crash, the worker should be able to re-run without corrupting state: overwrite the HLS output prefix, re-set progress to 0, re-run ffmpeg. No partial-resume logic in v1.
-
-## Job contract (Redis)
-
-Jobs are pushed by Laravel to a Redis list. Exact key and payload shape are defined in `PLAN.md` under "Job contract" — treat that section as the wire protocol. If you change the shape, update both sides (Laravel dispatcher + Go consumer) in the same commit.
-
-## Progress updates
-
-- Parse ffmpeg `-progress pipe:1` key/value lines. Use `out_time_us` ÷ total duration (from `ffprobe` on the source before encoding starts).
-- Throttle DB writes to at most once every ~2 seconds, or on whole-percent change, whichever is less frequent. Do not write on every progress line — that floods Postgres.
-- Always write a final `progress = 100, status = success` row before releasing the job, and a `status = failed` (with progress left where it was) on error.
-
-## Layout (target)
+## Commands
 
 ```
-golang-queue/
-  cmd/worker/main.go       # entrypoint, config, signal handling
-  internal/config/         # env loading
-  internal/queue/          # redis BRPOP consumer
-  internal/db/             # pgx pool, media_files queries
-  internal/s3/             # download source, upload HLS tree
-  internal/transcode/      # ffmpeg command builder + progress parser
-  internal/quality/        # mirror of VideoQuality enum
-  PLAN.md                  # system design (read this before changing architecture)
-  CLAUDE.md                # this file
-  go.mod
+go run ./cmd/worker          # run locally (requires .env)
+go build -o bin/worker ./cmd/worker   # release binary
+go test ./...                # run tests (none exist yet)
 ```
 
-Don't create this tree until the user asks for implementation — `PLAN.md` is the current deliverable.
+No lint/typecheck config. No Makefile or task runner.
 
-## Commands (once implemented)
+## Module & Go version
 
-- `go run ./cmd/worker` — run one worker locally.
-- `go build -o bin/worker ./cmd/worker` — build release binary.
-- `go test ./...` — run tests. Every change that touches ffmpeg arg building, progress parsing, or the job contract must have a test.
+- **Module:** `oxygen/worker` (import path is `oxygen/worker/internal/...`)
+- **Go 1.25.1**
+- Dependencies: `pgx/v5`, `go-redis/v9`, `aws-sdk-go-v2`, `godotenv`
 
-## Do NOT
+## Architecture (one-line summary per package)
 
-- Do not call into the Laravel HTTP API from Go. All coordination is via Postgres + Redis + S3.
-- Do not use an ORM. Use `pgx` directly with explicit SQL.
-- Do not cache DB rows across jobs. Re-read `media_files` at job start — the user may have deleted or renamed it.
-- Do not write files outside the per-job temp dir. Clean it up in a deferred call, including on panic.
-- Do not log the full ffmpeg stderr at INFO. It's enormous. Log at DEBUG and keep the last N lines for failure reports.
+| Package | Purpose |
+|---|---|
+| `cmd/worker` | Entrypoint, config load, signal handling, goroutine pool |
+| `internal/config` | Env loading via godotenv (`.env` in dev, real env in prod) |
+| `internal/queue` | Redis BRPOP consumer, full job pipeline orchestration |
+| `internal/db` | pgx pool, `media_files` + `media_file_profiles` queries |
+| `internal/s3` | Source download + streaming bucket upload (two separate S3 clients) |
+| `internal/transcode` | ffmpeg command builder, progress parser, codec auto-detect |
+| `internal/quality` | Mirror of Laravel's `VideoQuality` enum |
+
+## Non-negotiable rules
+
+- **Quality map** (`internal/quality/quality.go`) must stay in lockstep with `App\Enums\VideoQuality` in the Laravel app (`app/Enums/VideoQuality.php`). Same string keys, same width/height/bitrate. Update both sides in the same PR.
+- **Status values** must match `App\Enums\MediaFileStatus`: `uploaded`, `progress`, `success`, `failed`. Never invent new ones.
+- **Progress is clamped 0–100.** The DB column is `unsignedTinyInteger` (0–255) but semantically 0–100.
+- **Organization isolation.** Every query filters by `organization_id` from the job payload. Cross-check before doing work.
+- **Only `media_files` is writable** (status, progress, streaming_url, updated_at). Profiles, folders, organizations are read-only.
+- **One ffmpeg invocation per job.** Single command with `-filter_complex` + `split`, multiple `-map` outputs. Never loop per-bitrate.
+- **ffmpeg as subprocess only.** No cgo bindings. Kill on context cancel.
+- **No ORM.** Use `pgx` with explicit SQL.
+- **No Laravel HTTP calls.** Coordination is via Postgres + Redis + S3 only.
+
+## Job payload (actual, not PLAN.md)
+
+PLAN.md describes a minimal payload with `job_id`, `media_file_id`, etc. The **actual** payload pushed by Laravel is the full `media_files` row:
+
+```json
+{
+  "id": "uuid",
+  "organization_id": "uuid",
+  "folder_id": "uuid|null",
+  "title": "My Video",
+  "file_name": "video.mp4",
+  "file_path": "media/{org_id}/{uuid}.mp4",
+  "source_url": null,
+  "size": 4692397,
+  "status": "uploaded",
+  "progress": 0,
+  "created_at": "...",
+  "updated_at": "..."
+}
+```
+
+The worker re-reads `media_file_profiles` from Postgres (does not trust payload for qualities). If you change the payload shape, update both Laravel dispatcher and Go consumer in the same commit.
+
+## Config gotchas
+
+- **QUEUE_KEY** default is `oxygen-database-queues:transcode` — includes Laravel's Redis prefix. Must match what Laravel uses.
+- **FFMPEG_VIDEO_CODEC** default is `auto` (runtime detection in `internal/transcode/detect.go`): tries VideoToolbox on macOS, then NVENC, then falls back to `libx264`.
+- **Separate source/streaming S3 buckets.** `SOURCE_AWS_*` and `STREAMING_AWS_*` vars override shared `AWS_*` defaults. The streaming bucket's `STREAMING_AWS_URL` is used to build `streaming_url` stored in DB.
+- `DATABASE_URL` overrides individual `DB_*` vars. Fallback builds a DSN from `DB_HOST`/`DB_PORT`/etc.
+- `REDIS_PASSWORD` normalizes the literal string `"null"` to empty (Laravel convention).
+
+## Pipeline flow (per job)
+
+1. BRPOP from queue key (30s timeout, graceful on context cancel)
+2. Decode JSON payload, validate `id` + `organization_id` present
+3. Load `media_files` row from Postgres (org-scoped query)
+4. Load `media_file_profiles` row → get `qualities` array
+5. Set `status=progress, progress=0`
+6. Create per-job temp dir under `WORK_DIR` (deferred cleanup)
+7. Download source from S3 to local file, OR use `source_url` if no `file_path`
+8. Probe duration with ffprobe
+9. Build ffmpeg command from quality map, run with `-progress pipe:1`
+10. Parse `out_time_us` lines → compute percent, throttle DB writes (≥2s interval + whole-percent change)
+11. Upload HLS tree to streaming bucket
+12. Set `status=success, progress=100, streaming_url=<url>`
+13. On any error: `status=failed`, progress left as-is
+
+## Things an agent might get wrong
+
+- **ffmpeg stderr is captured in a 200-line ring buffer**, not logged at INFO. Only emitted on failure. Do not change this — ffmpeg stderr is enormous.
+- **Progress is capped at 99 during encoding** and only set to 100 after ffmpeg exits cleanly.
+- **Temp dir cleanup is deferred**, including on panic. Do not write files outside the per-job temp dir.
+- **No DB row caching across jobs.** Re-read `media_files` at job start.
+- **`filter_complex` uses `split=N`** to avoid re-decoding the source. The builder is in `transcoder.go` — command is assembled programmatically from the profile's qualities array.
