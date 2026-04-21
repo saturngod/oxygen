@@ -12,7 +12,9 @@
       "Bash(python3 -c 'import json,sys; d=json.load\\(sys.stdin\\); print\\([k for k in d.keys\\(\\) if \"manage\" in k]\\)')",
       "Bash(python3:*)",
       "Bash(npm run:*)",
-      "Bash(go build *)"
+      "Bash(go build *)",
+      "Bash(npx eslint *)",
+      "Bash(npx prettier *)"
     ]
   },
   "enableAllProjectMcpServers": true,

@@ -1,6 +1,5 @@
 import { Form, Head, Link, router, setLayoutProps } from '@inertiajs/react';
 import {
-    ChevronRight,
     Filter,
     Folder as FolderIcon,
     Link as LinkIcon,
@@ -11,15 +10,8 @@ import {
     UploadCloud,
     X,
 } from 'lucide-react';
-import {
-    useCallback,
-    useRef,
-    useState,
-    type ChangeEvent,
-    type DragEvent,
-    type FormEvent,
-    type KeyboardEvent,
-} from 'react';
+import { useCallback, useRef, useState } from 'react';
+import type { ChangeEvent, DragEvent, FormEvent, KeyboardEvent } from 'react';
 import ManageController from '@/actions/App/Http/Controllers/ManageController';
 import Heading from '@/components/heading';
 import InputError from '@/components/input-error';
@@ -108,7 +100,8 @@ type Props = {
 };
 
 const statusStyles: Record<FileStatus, string> = {
-    uploaded: 'bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-200',
+    uploaded:
+        'bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-200',
     progress:
         'bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-200',
     success:
@@ -131,10 +124,12 @@ function formatSize(bytes: number): string {
     const units = ['B', 'KB', 'MB', 'GB'];
     let size = bytes;
     let unit = 0;
+
     while (size >= 1024 && unit < units.length - 1) {
         size /= 1024;
         unit++;
     }
+
     return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
 }
 
@@ -144,6 +139,7 @@ function xsrfTokenFromCookie(): string {
     const match = document.cookie
         .split('; ')
         .find((row) => row.startsWith('XSRF-TOKEN='));
+
     return match ? decodeURIComponent(match.split('=')[1]) : '';
 }
 
@@ -190,7 +186,6 @@ export default function Manage({
     const [activeTag, setActiveTag] = useState(filters.tag ?? null);
     const [tagSearch, setTagSearch] = useState('');
     const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const tagTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const filteredTags = tagSearch
         ? availableTags.filter((t) =>
@@ -201,15 +196,19 @@ export default function Manage({
     const applyFilters = useCallback(
         (search: string, tag: string | null) => {
             const params = new URLSearchParams();
+
             if (currentFolder) {
                 params.set('folder', currentFolder.id);
             }
+
             if (search) {
                 params.set('search', search);
             }
+
             if (tag) {
                 params.set('tag', tag);
             }
+
             const qs = params.toString();
 
             router.visit(`${manage().url}${qs ? `?${qs}` : ''}`, {
@@ -223,9 +222,11 @@ export default function Manage({
 
     const handleSearchChange = (value: string) => {
         setSearchValue(value);
+
         if (searchTimer.current) {
             clearTimeout(searchTimer.current);
         }
+
         searchTimer.current = setTimeout(() => {
             applyFilters(value, activeTag);
         }, 300);
@@ -255,9 +256,11 @@ export default function Manage({
 
     const addTag = (raw: string) => {
         const value = raw.trim();
+
         if (!value) {
             return;
         }
+
         setTags((prev) => (prev.includes(value) ? prev : [...prev, value]));
         setTagInput('');
     };
@@ -288,6 +291,7 @@ export default function Manage({
         totalPartsRef.current = 0;
         etagsRef.current = [];
         abortRef.current = false;
+
         if (fileInputRef.current) {
             fileInputRef.current.value = '';
         }
@@ -305,9 +309,11 @@ export default function Manage({
             },
             body: JSON.stringify(body),
         });
+
         if (!res.ok) {
             throw new Error(`${url} failed (${res.status})`);
         }
+
         return (await res.json()) as T;
     };
 
@@ -318,14 +324,17 @@ export default function Manage({
             xhr.onload = () => {
                 if (xhr.status >= 200 && xhr.status < 300) {
                     const etag = xhr.getResponseHeader('ETag');
+
                     if (!etag) {
                         reject(
                             new Error(
                                 'S3 response missing ETag (check bucket CORS ExposeHeaders).',
                             ),
                         );
+
                         return;
                     }
+
                     resolve(etag);
                 } else {
                     reject(new Error(`S3 PUT failed (${xhr.status})`));
@@ -340,6 +349,7 @@ export default function Manage({
         if (!uploadIdRef.current) {
             return;
         }
+
         try {
             await postJson('/manage/files/multipart/abort', {
                 upload_id: uploadIdRef.current,
@@ -375,6 +385,7 @@ export default function Manage({
                 setUploadError(
                     err instanceof Error ? err.message : 'Init failed.',
                 );
+
                 return;
             }
         }
@@ -385,6 +396,7 @@ export default function Manage({
             if (abortRef.current) {
                 return;
             }
+
             const index = nextPartRef.current;
             const partNumber = index + 1;
             const start = index * CHUNK_SIZE;
@@ -406,6 +418,7 @@ export default function Manage({
                 setUploadError(
                     err instanceof Error ? err.message : 'Upload failed.',
                 );
+
                 return;
             }
 
@@ -414,6 +427,7 @@ export default function Manage({
         }
 
         setUploadState('finalizing');
+
         try {
             await postJson('/manage/files/multipart/complete', {
                 upload_id: uploadIdRef.current,
@@ -427,6 +441,7 @@ export default function Manage({
             setUploadError(
                 err instanceof Error ? err.message : 'Finalize failed.',
             );
+
             return;
         }
 
@@ -439,16 +454,22 @@ export default function Manage({
     const startChunkedUpload = () => {
         if (!selectedFile) {
             setUploadErrors({ file: 'Please choose a video file.' });
+
             return;
         }
+
         if (!uploadTitle.trim()) {
             setUploadErrors({ title: 'Title is required.' });
+
             return;
         }
+
         if (!selectedProfileId) {
             setUploadErrors({ profile_id: 'Please select a profile.' });
+
             return;
         }
+
         uploadIdRef.current = null;
         uploadKeyRef.current = null;
         nextPartRef.current = 0;
@@ -470,6 +491,7 @@ export default function Manage({
         if (!file) {
             return;
         }
+
         const allowed = [
             'video/mp4',
             'video/quicktime',
@@ -477,12 +499,16 @@ export default function Manage({
         ];
         const lowerName = file.name.toLowerCase();
         const extOk = lowerName.endsWith('.mp4') || lowerName.endsWith('.mov');
+
         if (!allowed.includes(file.type) && !extOk) {
             setUploadErrors({ file: 'Only .mp4 and .mov files are allowed.' });
+
             return;
         }
+
         setSelectedFile(file);
         setUploadErrors((prev) => ({ ...prev, file: '' }));
+
         if (!uploadTitle) {
             setUploadTitle(file.name.replace(/\.[^.]+$/, ''));
         }
@@ -507,7 +533,7 @@ export default function Manage({
         <>
             <Head title="Manage" />
 
-            <div className="flex h-full flex-1 flex-col gap-6 p-4">
+            <div className="flex h-full flex-1 flex-col gap-4 overflow-x-auto rounded-xl p-4">
                 <Heading
                     variant="page"
                     title="Manage"
@@ -518,25 +544,77 @@ export default function Manage({
                     }
                 />
 
-                <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-1 text-sm text-muted-foreground">
-                        <Link
-                            href={manage().url}
-                            className="rounded px-1.5 py-1 hover:bg-muted hover:text-foreground"
-                        >
-                            Root
-                        </Link>
-                        {currentFolder && (
-                            <>
-                                <ChevronRight className="size-3.5" />
-                                <span className="rounded px-1.5 py-1 text-foreground">
-                                    {currentFolder.name}
-                                </span>
-                            </>
-                        )}
+                <div className="flex flex-wrap items-center gap-2">
+                    <div className="relative min-w-0 flex-1">
+                        <Search className="absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                        <Input
+                            type="search"
+                            value={searchValue}
+                            onChange={(e) => handleSearchChange(e.target.value)}
+                            placeholder="Search by title..."
+                            className="pl-7"
+                        />
                     </div>
 
-                    <div className="flex items-center gap-2">
+                    <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                            <Button variant="outline">
+                                <Filter className="size-3.5" />
+                                {activeTag ? `Tag: ${activeTag}` : 'Filter'}
+                            </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="start" className="w-56 p-2">
+                            <Input
+                                type="search"
+                                value={tagSearch}
+                                onChange={(e) => setTagSearch(e.target.value)}
+                                placeholder="Search tags..."
+                                className="mb-2"
+                            />
+                            <div className="max-h-60 overflow-y-auto">
+                                {filteredTags.length === 0 ? (
+                                    <p className="px-2 py-1.5 text-xs text-muted-foreground">
+                                        No tags found
+                                    </p>
+                                ) : (
+                                    filteredTags.map((tag) => (
+                                        <DropdownMenuItem
+                                            key={tag}
+                                            onClick={() => {
+                                                setActiveTag(tag);
+                                                setTagSearch('');
+                                                applyFilters(searchValue, tag);
+                                            }}
+                                            className={
+                                                activeTag === tag
+                                                    ? 'bg-accent'
+                                                    : ''
+                                            }
+                                        >
+                                            {tag}
+                                        </DropdownMenuItem>
+                                    ))
+                                )}
+                            </div>
+                            {activeTag && (
+                                <>
+                                    <DropdownMenuSeparator />
+                                    <DropdownMenuItem
+                                        onClick={() => {
+                                            setActiveTag(null);
+                                            setTagSearch('');
+                                            applyFilters(searchValue, null);
+                                        }}
+                                    >
+                                        <X className="mr-2 size-3.5" />
+                                        Clear filter
+                                    </DropdownMenuItem>
+                                </>
+                            )}
+                        </DropdownMenuContent>
+                    </DropdownMenu>
+
+                    <div className="ml-auto flex items-center gap-2">
                         <Dialog
                             open={folderDialogOpen}
                             onOpenChange={setFolderDialogOpen}
@@ -601,6 +679,7 @@ export default function Manage({
                             open={uploadDialogOpen}
                             onOpenChange={(open) => {
                                 setUploadDialogOpen(open);
+
                                 if (!open) {
                                     resetUploadForm();
                                 }
@@ -851,7 +930,7 @@ export default function Manage({
                                                             ? 'Press enter to add'
                                                             : ''
                                                     }
-                                                    className="flex-1 min-w-[8ch] bg-transparent text-sm outline-none"
+                                                    className="min-w-[8ch] flex-1 bg-transparent text-sm outline-none"
                                                 />
                                             </div>
                                         </div>
@@ -902,8 +981,7 @@ export default function Manage({
                                                         type="button"
                                                         variant="secondary"
                                                         onClick={async () => {
-                                                            abortRef.current =
-                                                                true;
+                                                            abortRef.current = true;
                                                             await cancelMultipartUpload();
                                                             setUploadDialogOpen(
                                                                 false,
@@ -1086,9 +1164,9 @@ export default function Manage({
                                                         }
                                                     />
                                                     <p className="text-xs text-muted-foreground">
-                                                        The worker will
-                                                        download and transcode
-                                                        this video.
+                                                        The worker will download
+                                                        and transcode this
+                                                        video.
                                                     </p>
                                                 </div>
 
@@ -1148,7 +1226,7 @@ export default function Manage({
                                                                     ? 'Press enter to add'
                                                                     : ''
                                                             }
-                                                            className="flex-1 min-w-[8ch] bg-transparent text-sm outline-none"
+                                                            className="min-w-[8ch] flex-1 bg-transparent text-sm outline-none"
                                                         />
                                                     </div>
                                                 </div>
@@ -1176,80 +1254,6 @@ export default function Manage({
                             </DialogContent>
                         </Dialog>
                     </div>
-                </div>
-
-                <div className="flex items-center gap-2">
-                    <div className="relative w-full max-w-sm">
-                        <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
-                        <input
-                            type="text"
-                            value={searchValue}
-                            onChange={(e) => handleSearchChange(e.target.value)}
-                            placeholder="Search by title..."
-                            className="h-9 w-full rounded-md border bg-transparent pl-9 pr-3 text-sm outline-none placeholder:text-muted-foreground focus:ring-1 focus:ring-ring"
-                        />
-                    </div>
-
-                    <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                            <Button variant="outline" className="h-9">
-                                <Filter className="size-3.5" />
-                                {activeTag ? `Tag: ${activeTag}` : 'Filter'}
-                            </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent
-                            align="start"
-                            className="w-56 p-2"
-                        >
-                            <input
-                                type="text"
-                                value={tagSearch}
-                                onChange={(e) => setTagSearch(e.target.value)}
-                                placeholder="Search tags..."
-                                className="mb-2 h-8 w-full rounded-md border bg-transparent px-2 text-sm outline-none placeholder:text-muted-foreground focus:ring-1 focus:ring-ring"
-                            />
-                            <div className="max-h-60 overflow-y-auto">
-                                {filteredTags.length === 0 ? (
-                                    <p className="px-2 py-1.5 text-xs text-muted-foreground">
-                                        No tags found
-                                    </p>
-                                ) : (
-                                    filteredTags.map((tag) => (
-                                        <DropdownMenuItem
-                                            key={tag}
-                                            onClick={() => {
-                                                setActiveTag(tag);
-                                                setTagSearch('');
-                                                applyFilters(searchValue, tag);
-                                            }}
-                                            className={
-                                                activeTag === tag
-                                                    ? 'bg-accent'
-                                                    : ''
-                                            }
-                                        >
-                                            {tag}
-                                        </DropdownMenuItem>
-                                    ))
-                                )}
-                            </div>
-                            {activeTag && (
-                                <>
-                                    <DropdownMenuSeparator />
-                                    <DropdownMenuItem
-                                        onClick={() => {
-                                            setActiveTag(null);
-                                            setTagSearch('');
-                                            applyFilters(searchValue, null);
-                                        }}
-                                    >
-                                        <X className="mr-2 size-3.5" />
-                                        Clear filter
-                                    </DropdownMenuItem>
-                                </>
-                            )}
-                        </DropdownMenuContent>
-                    </DropdownMenu>
                 </div>
 
                 {!currentFolder && folders.length > 0 && (
@@ -1311,26 +1315,30 @@ export default function Manage({
                                                 '—'}
                                         </TableCell>
                                         <TableCell>
-                                            <div className="flex flex-col gap-1">
+                                            <div className="flex flex-col gap-1.5">
                                                 <Badge
                                                     variant="secondary"
                                                     className={
-                                                        statusStyles[file.status]
+                                                        statusStyles[
+                                                            file.status
+                                                        ]
                                                     }
                                                 >
                                                     {statusLabel[file.status]}
-                                                    {file.status ===
-                                                        'progress' &&
-                                                        ` · ${file.progress}%`}
                                                 </Badge>
                                                 {file.status === 'progress' && (
-                                                    <div className="h-1 w-20 overflow-hidden rounded-full bg-muted">
-                                                        <div
-                                                            className="h-full bg-primary transition-all"
-                                                            style={{
-                                                                width: `${file.progress}%`,
-                                                            }}
-                                                        />
+                                                    <div className="flex items-center gap-2">
+                                                        <div className="h-1 w-20 overflow-hidden rounded-full bg-muted">
+                                                            <div
+                                                                className="h-full bg-primary transition-all"
+                                                                style={{
+                                                                    width: `${file.progress}%`,
+                                                                }}
+                                                            />
+                                                        </div>
+                                                        <span className="text-[10px] text-muted-foreground tabular-nums">
+                                                            {file.progress}%
+                                                        </span>
                                                     </div>
                                                 )}
                                             </div>
@@ -1438,10 +1446,32 @@ export default function Manage({
                                     <TableRow>
                                         <TableCell
                                             colSpan={7}
-                                            className="h-24 text-center text-sm text-muted-foreground"
+                                            className="h-32 text-center"
                                         >
-                                            No files yet. Upload a video to get
-                                            started.
+                                            <div className="flex flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
+                                                <UploadCloud className="size-6" />
+                                                <p>
+                                                    {searchValue || activeTag
+                                                        ? 'No files match your filters.'
+                                                        : 'No files yet. Upload a video to get started.'}
+                                                </p>
+                                                {!searchValue &&
+                                                    !activeTag &&
+                                                    hasProfiles && (
+                                                        <Button
+                                                            size="sm"
+                                                            variant="outline"
+                                                            onClick={() =>
+                                                                setUploadDialogOpen(
+                                                                    true,
+                                                                )
+                                                            }
+                                                        >
+                                                            <Upload className="size-3.5" />
+                                                            Add video
+                                                        </Button>
+                                                    )}
+                                            </div>
                                         </TableCell>
                                     </TableRow>
                                 )}
@@ -1480,7 +1510,9 @@ export default function Manage({
                                 <div className="space-y-1.5">
                                     <Badge
                                         variant="secondary"
-                                        className={statusStyles[fileDetails.status]}
+                                        className={
+                                            statusStyles[fileDetails.status]
+                                        }
                                     >
                                         {statusLabel[fileDetails.status]}
                                         {fileDetails.status === 'progress' &&
@@ -1515,10 +1547,7 @@ export default function Manage({
                                         </span>
                                     ) : (
                                         fileDetails.tags.map((tag) => (
-                                            <Badge
-                                                key={tag}
-                                                variant="outline"
-                                            >
+                                            <Badge key={tag} variant="outline">
                                                 {tag}
                                             </Badge>
                                         ))
@@ -1581,7 +1610,10 @@ export default function Manage({
                                                         {profile.name}
                                                     </span>
                                                     <span className="text-[10px] text-muted-foreground">
-                                                        {profile.qualities.length}{' '}
+                                                        {
+                                                            profile.qualities
+                                                                .length
+                                                        }{' '}
                                                         rendition
                                                         {profile.qualities
                                                             .length === 1
@@ -1629,8 +1661,8 @@ export default function Manage({
                     <DialogHeader>
                         <DialogTitle>Delete file</DialogTitle>
                         <DialogDescription>
-                            This permanently deletes “{fileToDelete?.title}”
-                            and its file on S3. This cannot be undone.
+                            This permanently deletes “{fileToDelete?.title}” and
+                            its file on S3. This cannot be undone.
                         </DialogDescription>
                     </DialogHeader>
                     <DialogFooter className="gap-2">
@@ -1643,6 +1675,7 @@ export default function Manage({
                                 if (!fileToDelete) {
                                     return;
                                 }
+
                                 router.delete(
                                     `/manage/files/${fileToDelete.id}`,
                                     {
