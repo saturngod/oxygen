@@ -44,9 +44,14 @@ class ManageController extends Controller
                 'name' => $folder->name,
             ]);
 
+        $search = $request->query('search');
+        $tag = $request->query('tag');
+
         $files = MediaFile::query()
             ->where('organization_id', $organizationId)
             ->where('folder_id', $currentFolder?->id)
+            ->when($search, fn ($q) => $q->where('title', 'ilike', "%{$search}%"))
+            ->when($tag, fn ($q) => $q->whereJsonContains('tags', $tag))
             ->with('profiles:id,media_file_id,name,qualities')
             ->orderByDesc('created_at')
             ->get()
@@ -89,6 +94,19 @@ class ManageController extends Controller
             'folders' => $folders,
             'files' => $files,
             'profiles' => $profiles,
+            'filters' => [
+                'search' => $search,
+                'tag' => $tag,
+            ],
+            'availableTags' => MediaFile::query()
+                ->where('organization_id', $organizationId)
+                ->whereNotNull('tags')
+                ->pluck('tags')
+                ->flatten()
+                ->unique()
+                ->sort()
+                ->values()
+                ->all(),
         ]);
     }
 

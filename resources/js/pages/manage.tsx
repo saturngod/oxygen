@@ -1,15 +1,18 @@
 import { Form, Head, Link, router, setLayoutProps } from '@inertiajs/react';
 import {
     ChevronRight,
+    Filter,
     Folder as FolderIcon,
     Link as LinkIcon,
     MoreHorizontal,
     Plus,
+    Search,
     Upload,
     UploadCloud,
     X,
 } from 'lucide-react';
 import {
+    useCallback,
     useRef,
     useState,
     type ChangeEvent,
@@ -97,6 +100,11 @@ type Props = {
     folders: FolderItem[];
     files: FileItem[];
     profiles: ProfileOption[];
+    filters: {
+        search: string | null;
+        tag: string | null;
+    };
+    availableTags: string[];
 };
 
 const statusStyles: Record<FileStatus, string> = {
@@ -152,6 +160,8 @@ export default function Manage({
     folders,
     files,
     profiles,
+    filters,
+    availableTags,
 }: Props) {
     const defaultProfileId =
         profiles.find((profile) => profile.is_default)?.id ??
@@ -175,6 +185,51 @@ export default function Manage({
     );
     const fileInputRef = useRef<HTMLInputElement>(null);
     const hasProfiles = profiles.length > 0;
+
+    const [searchValue, setSearchValue] = useState(filters.search ?? '');
+    const [activeTag, setActiveTag] = useState(filters.tag ?? null);
+    const [tagSearch, setTagSearch] = useState('');
+    const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const tagTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const filteredTags = tagSearch
+        ? availableTags.filter((t) =>
+              t.toLowerCase().includes(tagSearch.toLowerCase()),
+          )
+        : availableTags;
+
+    const applyFilters = useCallback(
+        (search: string, tag: string | null) => {
+            const params = new URLSearchParams();
+            if (currentFolder) {
+                params.set('folder', currentFolder.id);
+            }
+            if (search) {
+                params.set('search', search);
+            }
+            if (tag) {
+                params.set('tag', tag);
+            }
+            const qs = params.toString();
+
+            router.visit(`${manage().url}${qs ? `?${qs}` : ''}`, {
+                preserveState: true,
+                preserveScroll: true,
+                only: ['files', 'filters'],
+            });
+        },
+        [currentFolder],
+    );
+
+    const handleSearchChange = (value: string) => {
+        setSearchValue(value);
+        if (searchTimer.current) {
+            clearTimeout(searchTimer.current);
+        }
+        searchTimer.current = setTimeout(() => {
+            applyFilters(value, activeTag);
+        }, 300);
+    };
 
     const [uploadState, setUploadState] = useState<UploadState>('idle');
     const [uploadProgress, setUploadProgress] = useState(0);
@@ -1123,6 +1178,80 @@ export default function Manage({
                     </div>
                 </div>
 
+                <div className="flex items-center gap-2">
+                    <div className="relative w-full max-w-sm">
+                        <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
+                        <input
+                            type="text"
+                            value={searchValue}
+                            onChange={(e) => handleSearchChange(e.target.value)}
+                            placeholder="Search by title..."
+                            className="h-9 w-full rounded-md border bg-transparent pl-9 pr-3 text-sm outline-none placeholder:text-muted-foreground focus:ring-1 focus:ring-ring"
+                        />
+                    </div>
+
+                    <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                            <Button variant="outline" className="h-9">
+                                <Filter className="size-3.5" />
+                                {activeTag ? `Tag: ${activeTag}` : 'Filter'}
+                            </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent
+                            align="start"
+                            className="w-56 p-2"
+                        >
+                            <input
+                                type="text"
+                                value={tagSearch}
+                                onChange={(e) => setTagSearch(e.target.value)}
+                                placeholder="Search tags..."
+                                className="mb-2 h-8 w-full rounded-md border bg-transparent px-2 text-sm outline-none placeholder:text-muted-foreground focus:ring-1 focus:ring-ring"
+                            />
+                            <div className="max-h-60 overflow-y-auto">
+                                {filteredTags.length === 0 ? (
+                                    <p className="px-2 py-1.5 text-xs text-muted-foreground">
+                                        No tags found
+                                    </p>
+                                ) : (
+                                    filteredTags.map((tag) => (
+                                        <DropdownMenuItem
+                                            key={tag}
+                                            onClick={() => {
+                                                setActiveTag(tag);
+                                                setTagSearch('');
+                                                applyFilters(searchValue, tag);
+                                            }}
+                                            className={
+                                                activeTag === tag
+                                                    ? 'bg-accent'
+                                                    : ''
+                                            }
+                                        >
+                                            {tag}
+                                        </DropdownMenuItem>
+                                    ))
+                                )}
+                            </div>
+                            {activeTag && (
+                                <>
+                                    <DropdownMenuSeparator />
+                                    <DropdownMenuItem
+                                        onClick={() => {
+                                            setActiveTag(null);
+                                            setTagSearch('');
+                                            applyFilters(searchValue, null);
+                                        }}
+                                    >
+                                        <X className="mr-2 size-3.5" />
+                                        Clear filter
+                                    </DropdownMenuItem>
+                                </>
+                            )}
+                        </DropdownMenuContent>
+                    </DropdownMenu>
+                </div>
+
                 {!currentFolder && folders.length > 0 && (
                     <div>
                         <h2 className="mb-2 text-sm font-medium text-muted-foreground">
@@ -1283,9 +1412,6 @@ export default function Manage({
                                                         }}
                                                     >
                                                         Copy streaming URL
-                                                    </DropdownMenuItem>
-                                                    <DropdownMenuItem disabled>
-                                                        Requeue (soon)
                                                     </DropdownMenuItem>
                                                     <DropdownMenuSeparator />
                                                     <DropdownMenuItem
