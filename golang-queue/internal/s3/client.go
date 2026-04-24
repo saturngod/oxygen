@@ -3,6 +3,7 @@ package s3
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -82,15 +83,19 @@ func (c *Client) DownloadSource(ctx context.Context, key, destPath string) error
 	}
 	defer f.Close()
 
-	downloader := manager.NewDownloader(c.source.client, func(d *manager.Downloader) {
-		d.PartSize = 8 * 1024 * 1024
-		d.Concurrency = 4
-	})
-
-	n, err := downloader.Download(ctx, f, &s3.GetObjectInput{
+	// Use plain GetObject instead of the concurrent range-request manager.
+	// The manager's multipart range downloads + checksum validation are not
+	// compatible with MinIO and cause "unexpected EOF" errors.
+	resp, err := c.source.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(c.source.bucket),
 		Key:    aws.String(key),
 	})
+	if err != nil {
+		return fmt.Errorf("download %s: %w", key, err)
+	}
+	defer resp.Body.Close()
+
+	n, err := io.Copy(f, resp.Body)
 	if err != nil {
 		return fmt.Errorf("download %s: %w", key, err)
 	}
