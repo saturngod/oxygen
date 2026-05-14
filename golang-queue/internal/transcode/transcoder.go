@@ -57,6 +57,23 @@ func (t *Transcoder) ProbeDuration(ctx context.Context, inputURL string) (float6
 	return d, nil
 }
 
+func (t *Transcoder) probeHasAudio(ctx context.Context, inputURL string) (bool, error) {
+	cmd := exec.CommandContext(ctx, t.cfg.FfprobeBin,
+		"-v", "quiet",
+		"-print_format", "json",
+		"-show_streams",
+		"-select_streams", "a",
+		inputURL,
+	)
+
+	out, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("ffprobe audio: %w", err)
+	}
+
+	return strings.Contains(string(out), `"codec_name"`), nil
+}
+
 func (t *Transcoder) Run(ctx context.Context, inputURL string, qualities []string, outputDir string, onProgress ProgressCallback) error {
 	renditions := make([]quality.Rendition, 0, len(qualities))
 	for _, q := range qualities {
@@ -69,6 +86,12 @@ func (t *Transcoder) Run(ctx context.Context, inputURL string, qualities []strin
 
 	if len(renditions) == 0 {
 		return fmt.Errorf("no valid renditions")
+	}
+
+	hasAudio, err := t.probeHasAudio(ctx, inputURL)
+	if err != nil {
+		t.log.Warn("audio probe failed, assuming audio present", "err", err)
+		hasAudio = true
 	}
 
 	n := len(renditions)
@@ -106,17 +129,17 @@ func (t *Transcoder) Run(ctx context.Context, inputURL string, qualities []strin
 		)
 	}
 
-	audioMaps := []string{}
-	audioCodecs := []string{}
-	for i, r := range renditions {
-		args = append(args, "-map", "a:0")
-		audioMaps = append(audioMaps, fmt.Sprintf("a:%d", i))
-		audioCodecs = append(audioCodecs,
-			fmt.Sprintf("-c:a:%d", i), "aac",
-			fmt.Sprintf("-b:a:%d", i), fmt.Sprintf("%dk", r.AudioBitrate),
-		)
+	if hasAudio {
+		audioCodecs := []string{}
+		for i, r := range renditions {
+			args = append(args, "-map", "a:0")
+			audioCodecs = append(audioCodecs,
+				fmt.Sprintf("-c:a:%d", i), "aac",
+				fmt.Sprintf("-b:a:%d", i), fmt.Sprintf("%dk", r.AudioBitrate),
+			)
+		}
+		args = append(args, audioCodecs...)
 	}
-	args = append(args, audioCodecs...)
 
 	args = append(args,
 		"-preset", "veryfast",
@@ -134,8 +157,14 @@ func (t *Transcoder) Run(ctx context.Context, inputURL string, qualities []strin
 	)
 
 	varStreamMap := make([]string, n)
-	for i := range renditions {
-		varStreamMap[i] = fmt.Sprintf("v:%d,a:%d", i, i)
+	if hasAudio {
+		for i := range renditions {
+			varStreamMap[i] = fmt.Sprintf("v:%d,a:%d", i, i)
+		}
+	} else {
+		for i := range renditions {
+			varStreamMap[i] = fmt.Sprintf("v:%d", i)
+		}
 	}
 	args = append(args, "-var_stream_map", strings.Join(varStreamMap, " "))
 
@@ -146,7 +175,7 @@ func (t *Transcoder) Run(ctx context.Context, inputURL string, qualities []strin
 		os.MkdirAll(filepath.Join(outputDir, fmt.Sprintf("v%d", i)), 0o755)
 	}
 
-	t.log.Info("starting ffmpeg", "args_summary", summarizeArgs(args))
+	t.log.Info("starting ffmpeg", "args_summary", summarizeArgs(args), "has_audio", hasAudio)
 
 	cmd := exec.CommandContext(ctx, t.cfg.FfmpegBin, args...)
 	cmd.Stderr = newRingBuffer(200)

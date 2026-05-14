@@ -357,7 +357,10 @@ class ManageController extends Controller
 
     private function dispatchTranscodeJob(MediaFile $mediaFile): void
     {
-        Redis::lpush('queues:transcode', json_encode([
+        $queueKey = config('services.transcode.queue_key');
+        $webhookQueueKey = config('services.transcode.webhook_queue_key');
+
+        Redis::lpush($queueKey, json_encode([
             'id' => $mediaFile->id,
             'organization_id' => $mediaFile->organization_id,
             'folder_id' => $mediaFile->folder_id,
@@ -371,6 +374,15 @@ class ManageController extends Controller
             'progress' => $mediaFile->progress,
             'created_at' => $mediaFile->created_at?->toIso8601String(),
             'updated_at' => $mediaFile->updated_at?->toIso8601String(),
+        ]));
+
+        Redis::lpush($webhookQueueKey, json_encode([
+            'organization_id' => $mediaFile->organization_id,
+            'event' => 'file_uploaded',
+            'title' => $mediaFile->title,
+            'file_name' => $mediaFile->file_name ?? '',
+            'status' => $mediaFile->status->value,
+            'tags' => $mediaFile->tags ?? [],
         ]));
     }
 }

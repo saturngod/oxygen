@@ -23,6 +23,7 @@ type MediaFileRow struct {
 	Size           int64
 	Status         string
 	Progress       int
+	Tags           []string
 	CreatedAt      *time.Time
 	UpdatedAt      *time.Time
 }
@@ -69,18 +70,18 @@ func (s *Store) Close() {
 func (s *Store) LoadMediaFile(ctx context.Context, id, organizationID string) (*MediaFileRow, error) {
 	const q = `
 		SELECT id, organization_id, folder_id, title, file_name, file_path,
-		       source_url, streaming_url, size, status, progress, created_at, updated_at
+		       source_url, streaming_url, size, status, progress, tags, created_at, updated_at
 		FROM media_files
 		WHERE id = $1 AND organization_id = $2
 	`
 
 	row := s.pool.QueryRow(ctx, q, id, organizationID)
 	var m MediaFileRow
-	var qualitiesJSON []byte
+	var tagsJSON []byte
 
 	if err := row.Scan(
 		&m.ID, &m.OrganizationID, &m.FolderID, &m.Title, &m.FileName, &m.FilePath,
-		&m.SourceURL, &m.StreamingURL, &m.Size, &m.Status, &m.Progress,
+		&m.SourceURL, &m.StreamingURL, &m.Size, &m.Status, &m.Progress, &tagsJSON,
 		&m.CreatedAt, &m.UpdatedAt,
 	); err != nil {
 		if err == pgx.ErrNoRows {
@@ -89,7 +90,13 @@ func (s *Store) LoadMediaFile(ctx context.Context, id, organizationID string) (*
 		return nil, fmt.Errorf("scan media_file: %w", err)
 	}
 
-	_ = qualitiesJSON
+	if tagsJSON != nil {
+		_ = json.Unmarshal(tagsJSON, &m.Tags)
+	}
+	if m.Tags == nil {
+		m.Tags = []string{}
+	}
+
 	return &m, nil
 }
 

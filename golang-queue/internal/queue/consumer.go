@@ -31,6 +31,15 @@ type Job struct {
 	UpdatedAt      string  `json:"updated_at"`
 }
 
+type WebhookEvent struct {
+	OrganizationID string   `json:"organization_id"`
+	Event          string   `json:"event"`
+	Title          string   `json:"title"`
+	FileName       string   `json:"file_name"`
+	Status         string   `json:"status"`
+	Tags           []string `json:"tags"`
+}
+
 type S3Client interface {
 	DownloadSource(ctx context.Context, key, destPath string) error
 	UploadHLS(ctx context.Context, localDir, orgID, mediaFileID string) error
@@ -38,26 +47,28 @@ type S3Client interface {
 }
 
 type Consumer struct {
-	rdb        *redis.Client
-	queueKey   string
-	workerID   int
-	log        *slog.Logger
-	store      *db.Store
-	s3         S3Client
-	transcoder *transcode.Transcoder
-	workDir    string
+	rdb             *redis.Client
+	queueKey        string
+	webhookQueueKey string
+	workerID        int
+	log             *slog.Logger
+	store           *db.Store
+	s3              S3Client
+	transcoder      *transcode.Transcoder
+	workDir         string
 }
 
 func NewConsumer(rdb *redis.Client, queueKey string, workerID int, store *db.Store, s3 S3Client, tx *transcode.Transcoder, workDir string) *Consumer {
 	return &Consumer{
-		rdb:        rdb,
-		queueKey:   queueKey,
-		workerID:   workerID,
-		log:        slog.With("worker_id", workerID, "queue_key", queueKey),
-		store:      store,
-		s3:         s3,
-		transcoder: tx,
-		workDir:    workDir,
+		rdb:             rdb,
+		queueKey:        queueKey,
+		webhookQueueKey: queueKey + ":webhooks",
+		workerID:        workerID,
+		log:             slog.With("worker_id", workerID, "queue_key", queueKey),
+		store:           store,
+		s3:              s3,
+		transcoder:      tx,
+		workDir:         workDir,
 	}
 }
 
@@ -128,12 +139,12 @@ func (c *Consumer) handle(ctx context.Context, raw string) {
 	profile, err := c.store.LoadMediaFileProfile(ctx, job.ID)
 	if err != nil {
 		c.log.Error("load profile failed", "err", err, "media_file_id", job.ID)
-		c.markFailed(ctx, job.ID, 0)
+		c.markFailedWithWebhook(ctx, job, mediaFile, 0)
 		return
 	}
 	if profile == nil {
 		c.log.Error("no profile found for media_file", "media_file_id", job.ID)
-		c.markFailed(ctx, job.ID, 0)
+		c.markFailedWithWebhook(ctx, job, mediaFile, 0)
 		return
 	}
 
@@ -145,12 +156,14 @@ func (c *Consumer) handle(ctx context.Context, raw string) {
 
 	if err := c.store.UpdateProgress(ctx, job.ID, "progress", 0); err != nil {
 		c.log.Error("set progress=0 failed", "err", err)
+	} else {
+		c.pushWebhookEvent(ctx, job, mediaFile, "progress")
 	}
 
 	jobDir := filepath.Join(c.workDir, job.ID)
 	if err := os.MkdirAll(jobDir, 0o755); err != nil {
 		c.log.Error("create work dir failed", "err", err, "path", jobDir)
-		c.markFailed(ctx, job.ID, 0)
+		c.markFailedWithWebhook(ctx, job, mediaFile, 0)
 		return
 	}
 	defer os.RemoveAll(jobDir)
@@ -158,7 +171,7 @@ func (c *Consumer) handle(ctx context.Context, raw string) {
 	outputDir := filepath.Join(jobDir, "hls")
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		c.log.Error("create output dir failed", "err", err, "path", outputDir)
-		c.markFailed(ctx, job.ID, 0)
+		c.markFailedWithWebhook(ctx, job, mediaFile, 0)
 		return
 	}
 
@@ -167,14 +180,14 @@ func (c *Consumer) handle(ctx context.Context, raw string) {
 		sourcePath = filepath.Join(jobDir, "source"+filepath.Ext(*mediaFile.FilePath))
 		if err := c.s3.DownloadSource(ctx, *mediaFile.FilePath, sourcePath); err != nil {
 			c.log.Error("download source failed", "err", err)
-			c.markFailed(ctx, job.ID, 0)
+			c.markFailedWithWebhook(ctx, job, mediaFile, 0)
 			return
 		}
 	} else if mediaFile.SourceURL != nil && *mediaFile.SourceURL != "" {
 		sourcePath = *mediaFile.SourceURL
 	} else {
 		c.log.Error("no source file_path or source_url", "media_file_id", job.ID)
-		c.markFailed(ctx, job.ID, 0)
+		c.markFailedWithWebhook(ctx, job, mediaFile, 0)
 		return
 	}
 
@@ -186,13 +199,13 @@ func (c *Consumer) handle(ctx context.Context, raw string) {
 
 	if err != nil {
 		c.log.Error("transcode failed", "err", err, "media_file_id", job.ID)
-		c.markFailed(ctx, job.ID, 0)
+		c.markFailedWithWebhook(ctx, job, mediaFile, 0)
 		return
 	}
 
 	if err := c.s3.UploadHLS(ctx, outputDir, job.OrganizationID, job.ID); err != nil {
 		c.log.Error("s3 upload failed", "err", err, "media_file_id", job.ID)
-		c.markFailed(ctx, job.ID, 0)
+		c.markFailedWithWebhook(ctx, job, mediaFile, 0)
 		return
 	}
 
@@ -206,11 +219,42 @@ func (c *Consumer) handle(ctx context.Context, raw string) {
 		"media_file_id", job.ID,
 		"streaming_url", streamingURL,
 	)
+
+	c.pushWebhookEvent(ctx, job, mediaFile, "success")
 }
 
-func (c *Consumer) markFailed(ctx context.Context, mediaFileID string, progress int) {
+func (c *Consumer) pushWebhookEvent(ctx context.Context, job Job, mediaFile *db.MediaFileRow, status string) {
+	evt := WebhookEvent{
+		OrganizationID: job.OrganizationID,
+		Event:          "file_status_changed",
+		Title:          mediaFile.Title,
+		FileName:       strOrEmpty(mediaFile.FileName),
+		Status:         status,
+		Tags:           mediaFile.Tags,
+	}
+
+	payload, err := json.Marshal(evt)
+	if err != nil {
+		c.log.Error("marshal webhook event failed", "err", err)
+		return
+	}
+
+	if err := c.rdb.LPush(ctx, c.webhookQueueKey, payload).Err(); err != nil {
+		c.log.Error("lpush webhook event failed", "err", err)
+	}
+}
+
+func (c *Consumer) markFailed(ctx context.Context, mediaFileID string, progress int) error {
 	if err := c.store.UpdateFailed(ctx, mediaFileID, progress); err != nil {
 		c.log.Error("mark failed error", "err", err, "media_file_id", mediaFileID)
+		return err
+	}
+	return nil
+}
+
+func (c *Consumer) markFailedWithWebhook(ctx context.Context, job Job, mediaFile *db.MediaFileRow, progress int) {
+	if err := c.markFailed(ctx, job.ID, progress); err == nil {
+		c.pushWebhookEvent(ctx, job, mediaFile, "failed")
 	}
 }
 

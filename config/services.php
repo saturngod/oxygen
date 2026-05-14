@@ -35,4 +35,9 @@ return [
         ],
     ],
 
+    'transcode' => [
+        'queue_key' => env('TRANSCODE_QUEUE_KEY', 'queues:transcode'),
+        'webhook_queue_key' => env('TRANSCODE_WEBHOOK_QUEUE_KEY', 'queues:transcode:webhooks'),
+    ],
+
 ];

@@ -1,0 +1,355 @@
+# Oxygen — Video Transcoding Platform
+
+A multi-tenant video transcoding service built with **Laravel 13 + Inertia v3 + React 19** on the web layer and a standalone **Go worker** for FFmpeg-based transcoding. Coordination happens through shared **Postgres**, **Redis**, and **S3** — the PHP and Go processes never call each other over HTTP.
+
+## Architecture Overview
+
+```
+┌──────────────┐      ┌──────────────┐      ┌──────────────┐
+│   Browser    │      │   Laravel    │      │  Go Worker   │
+│  (React/     │─────▶│  (Upload &   │─────▶│  (FFmpeg     │
+│   Inertia)   │      │   Manage)    │      │   Transcode) │
+└──────┬───────┘      └──────┬───────┘      └──────┬───────┘
+       │                     │                     │
+       │  S3 Direct Upload   │    Redis (Jobs)     │
+       └─────────────────────┤◄────────────────────┤
+                             │                     │
+                     ┌───────▼───────┐     ┌───────▼───────┐
+                     │    Amazon     │     │    Postgres   │
+                     │      S3       │     │  (media_files │
+                     │ (Source +     │     │   profiles)  │
+                     │  Streaming)   │     └───────────────┘
+                     └───────────────┘
+```
+
+```mermaid
+graph TB
+    subgraph "Browser (React + Inertia v3)"
+        B[Manage Page]
+        B -->|1. Init| INIT
+        B -->|2. PUT chunks| S3
+        B -->|3. Complete| COMP
+    end
+
+    subgraph "Laravel Application"
+        INIT[POST /multipart/init]
+        SIGN[POST /multipart/sign-part]
+        COMP[POST /multipart/complete]
+        ABORT[POST /multipart/abort]
+        WH_CONSUMER[webhooks:consume artisan command]
+        SEND_JOB[SendWebhookJob]
+    end
+
+    subgraph "Storage Layer"
+        REDIS[(Redis)]
+        PG[(Postgres)]
+        S3_SRC[S3 Source Bucket]
+        S3_DST[S3 Streaming Bucket]
+    end
+
+    subgraph "Go Worker (goroutine pool)"
+        WORKER[Consumer.Run]
+        TRANSCODE[ffmpeg subprocess]
+    end
+
+    subgraph "External"
+        EXT[Webhook Endpoint]
+    end
+
+    B -->|sign-part| SIGN
+    B -->|abort| ABORT
+    SIGN -->|presigned URL| B
+    B -.->|PUT chunk direct| S3_SRC
+
+    COMP -->|create MediaFile row| PG
+    COMP -->|LPUSH job payload| REDIS
+    COMP -->|LPUSH file_uploaded event| REDIS
+
+    REDIS -->|BRPOP job| WORKER
+    WORKER -->|download source| S3_SRC
+    WORKER -->|UPDATE status/progress| PG
+    WORKER --> TRANSCODE
+    TRANSCODE -->|upload HLS tree| S3_DST
+    WORKER -->|UPDATE success + streaming_url| PG
+    WORKER -->|LPUSH status event| REDIS
+
+    REDIS -->|BRPOP webhook events| WH_CONSUMER
+    WH_CONSUMER -->|dispatch to Laravel queue| REDIS
+    REDIS -->|queue:work picks up job| SEND_JOB
+    SEND_JOB -->|re-read Webhook model| PG
+    SEND_JOB -->|HTTP POST| EXT
+```
+
+## Upload Flow (S3 Direct Multipart)
+
+The browser uploads directly to S3. The Laravel app never proxies file bytes — it only issues presigned URLs and records metadata.
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant L as Laravel
+    participant C as Redis Cache
+    participant S3 as S3 (Source)
+
+    B->>L: POST /multipart/init {file_name, folder_id, profile_id}
+    L->>L: Validate folder ownership + profile org scope
+    L->>L: Generate S3 key: media/{org_id}/{uuid}.{ext}
+    L->>S3: CreateMultipartUpload
+    S3-->>L: UploadId
+    L->>C: Cache upload context (24h TTL)
+    L-->>B: {upload_id, key}
+
+    loop For each 5MB chunk
+        B->>L: POST /multipart/sign-part {upload_id, part_number}
+        L->>C: Re-read & authorize session
+        L->>S3: Presign UploadPart URL (20min)
+        S3-->>L: Presigned URL
+        L-->>B: {url}
+        B->>S3: PUT chunk directly (presigned URL)
+        S3-->>B: ETag header
+    end
+
+    B->>L: POST /multipart/complete {upload_id, title, parts[], tags}
+    L->>C: Re-read & authorize session
+    L->>S3: CompleteMultipartUpload
+    L->>S3: headObject (get file size)
+    L->>L: DB txn: create MediaFile + MediaFileProfile
+    L->>L: dispatchTranscodeJob() → LPUSH to Redis
+    L->>C: Evict cache entry
+    L-->>B: {ok: true}
+```
+
+**Security**: The server never trusts `uploadId`, `key`, or `folder_id` from the client. Every endpoint re-reads the upload context from cache and re-checks `organization_id` against the session.
+
+## Transcoding Pipeline
+
+The Go worker is a standalone binary. It shares Postgres, Redis, and S3 with Laravel but makes no HTTP calls to it.
+
+```mermaid
+flowchart TD
+    BRPOP[BRPOP from Redis queue<br/>30s timeout] --> DECODE[Decode JSON payload]
+    DECODE --> |Missing id or org_id| DROP[Log error, drop job]
+    DECODE --> LOAD_MF[Load media_files row from Postgres<br/>WHERE id=$1 AND organization_id=$2]
+
+    LOAD_MF --> |Not found / org mismatch| DROP
+    LOAD_MF --> LOAD_PROF[Load media_file_profiles row<br/>for quality snapshot]
+
+    LOAD_PROF --> |No profile| FAIL[markFailed → status=failed]
+    LOAD_PROF --> SET_PROGRESS[Set status=progress, progress=0]
+
+    SET_PROGRESS --> MKDIR[Create temp dir under WORK_DIR]
+    MKDIR --> DL{Has file_path?}
+
+    DL --> |Yes| DOWNLOAD[Download source from S3]
+    DL --> |No| URL{Has source_url?}
+    URL --> |Yes| USE_URL[Use remote URL directly]
+    URL --> |No| FAIL
+
+    DOWNLOAD --> TRANSCODE
+    USE_URL --> TRANSCODE[Run ffmpeg<br/>single invocation, all renditions]
+
+    TRANSCODE --> |Error| FAIL
+    TRANSCODE --> UPLOAD[Upload HLS tree to streaming S3]
+
+    UPLOAD --> |Error| FAIL
+    UPLOAD --> SUCCESS[Set status=success<br/>progress=100<br/>streaming_url=url]
+
+    FAIL --> CLEANUP[cleanup temp dir]
+    SUCCESS --> CLEANUP
+
+    style FAIL fill:#f66,color:#fff
+    style SUCCESS fill:#4c4,color:#fff
+```
+
+### Single FFmpeg Invocation
+
+All renditions are produced in **one ffmpeg call** using `filter_complex` with `split=N` to avoid re-decoding the source:
+
+```
+ffmpeg -i source.mp4 \
+  -filter_complex "[0:v]split=2[v0][v1];[v0]scale=1280:720[vout0];[v1]scale=1920:1080[vout1]" \
+  -map "[vout0]" -c:v:0 libx264 -b:v:0 2800k \
+  -map "[vout1]" -c:v:1 libx264 -b:v:1 5000k \
+  -map a:0 -c:a:0 aac -b:a:0 128k \
+  -map a:0 -c:a:1 aac -b:a:1 128k \
+  -f hls -hls_time 6 -hls_playlist_type vod \
+  -var_stream_map "v:0,a:0 v:1,a:1" \
+  -master_pl_name main.m3u8
+  output/hls/v%v/segment_%d.ts
+```
+
+Progress is parsed from `out_time_us=` on stdout, capped at 99 during encoding, and written to Postgres with a 2-second throttle.
+
+## Webhook Notification System
+
+```mermaid
+sequenceDiagram
+    participant GO as Go Worker
+    participant R as Redis
+    participant CMD as webhooks:consume
+    participant JOB as SendWebhookJob
+    participant DB as Postgres
+    participant EXT as External Endpoint
+
+    Note over GO: Job starts / succeeds / fails
+    GO->>R: LPUSH event to webhook queue
+
+    CMD->>R: BRPOP webhook queue
+    R-->>CMD: {organization_id, event, status, ...}
+    CMD->>DB: SELECT webhooks WHERE org_id=? AND is_active=true
+
+    loop For each active webhook
+        CMD->>JOB: dispatch SendWebhookJob
+        JOB->>DB: Re-read webhook (may have been deactivated)
+        JOB->>JOB: Check event type in webhook.events[]
+        JOB->>EXT: HTTP POST (10s timeout, 2 retries)
+        EXT-->>JOB: 200 OK / Error
+    end
+```
+
+**Event types**: `file_uploaded` (from Laravel), `file_status_changed` with status `progress`/`success`/`failed` (from Go worker).
+
+**Delivery guarantees**: 3 attempts with backoff `[5s, 30s, 120s]`. Webhooks are re-read from DB before each attempt — deactivating a webhook stops pending deliveries.
+
+## Quality & Profile System
+
+Each organization defines **profiles** — named sets of quality levels. When a file is uploaded, the profile's qualities are **snapshotted** into `media_file_profiles`, so editing a profile later doesn't affect in-flight or completed jobs.
+
+```mermaid
+erDiagram
+    ORGANIZATION ||--o{ PROFILE : "has many"
+    ORGANIZATION ||--o{ MEDIA_FILE : "has many"
+    PROFILE ||--o{ MEDIA_FILE_PROFILE : "snapshot at upload"
+    MEDIA_FILE ||--|| MEDIA_FILE_PROFILE : "has one"
+
+    PROFILE {
+        uuid id PK
+        uuid organization_id FK
+        string name
+        json qualities "e.g. [720p, 1080p]"
+        boolean is_default
+    }
+
+    MEDIA_FILE_PROFILE {
+        uuid id PK
+        uuid media_file_id FK
+        uuid profile_id FK
+        string name "snapshot"
+        json qualities "snapshot"
+    }
+
+    MEDIA_FILE {
+        uuid id PK
+        uuid organization_id FK
+        uuid folder_id FK
+        string title
+        string file_path
+        string source_url
+        string streaming_url
+        string status "uploaded|progress|success|failed"
+        int progress "0-100"
+        jsonb tags
+    }
+```
+
+### Quality Catalog (Laravel + Go must match)
+
+| Quality | Resolution | Video Bitrate | Audio Bitrate |
+|---------|-----------|---------------|---------------|
+| 240p    | 352×240   | 600 kbps      | 64 kbps       |
+| 360p    | 640×360   | 800 kbps      | 96 kbps       |
+| 480p    | 842×480   | 1,400 kbps    | 128 kbps      |
+| 720p    | 1,280×720 | 2,800 kbps    | 128 kbps      |
+| 1080p   | 1,920×1,080 | 5,000 kbps  | 128 kbps      |
+| 1440p   | 2,560×1,440 | 8,000 kbps  | 192 kbps      |
+| 2160p   | 3,840×2,160 | 25,000 kbps | 192 kbps      |
+
+Defined in `App\Enums\VideoQuality` (PHP) and `internal/quality/quality.go` (Go). Changing one requires updating the other in the same PR.
+
+## Multi-Tenancy (Organization Isolation)
+
+```mermaid
+graph LR
+    subgraph "Session Layer"
+        SESS[current_organization_id<br/>in session]
+    end
+
+    subgraph "Route Middleware"
+        A1[auth + verified]
+        A2[EnsureOrganizationMember]
+        A3[EnsureOrganizationAdmin]
+        A1 --> A2 --> A3
+    end
+
+    subgraph "Data Layer"
+        CTRL["Controller: scope every query<br/>WHERE organization_id = session_org"]
+        GO_WORKER["Go: LoadMediaFile<br/>WHERE id=$1 AND organization_id=$2"]
+        S3_NS["S3 keys: media/{org_id}/...<br/>hls/{org_id}/{file_id}/..."]
+    end
+
+    SESS --> A2
+    A2 --> CTRL
+    A3 --> CTRL
+    CTRL --> GO_WORKER
+    CTRL --> S3_NS
+```
+
+Every layer enforces org isolation:
+- **Session** — `current_organization_id` resolved from user's memberships
+- **Middleware** — three concentric groups (auth → member → admin)
+- **Controllers** — every query scoped by `organization_id` from session
+- **Go worker** — re-verifies `organization_id` from DB, drops mismatched jobs
+- **S3** — keys namespaced by org ID
+- **Webhooks** — only delivered to webhooks belonging to the event's org
+
+## Tech Stack
+
+| Component | Technology |
+|-----------|-----------|
+| Web framework | Laravel 13 (PHP 8.4) |
+| Frontend | React 19 + Inertia v3 + Tailwind v4 |
+| UI components | shadcn/ui (Radix) + Lucide icons |
+| Transcode worker | Go 1.25 (standalone binary) |
+| Transcoding | FFmpeg (subprocess) — VideoToolbox / NVENC / libx264 |
+| Database | Postgres (shared between Laravel & Go) |
+| Queue | Redis (raw LPUSH/BRPOP, not Laravel Queues) |
+| Storage | Amazon S3 (separate source + streaming buckets) |
+
+## Development
+
+```bash
+# Laravel app
+composer run setup          # first-time: install, migrate, build
+composer run dev            # php serve + queue:listen + pail + vite dev
+
+# Go worker (from golang-queue/)
+cp .env.example .env        # configure DATABASE_URL, REDIS_ADDR, AWS creds
+go run ./cmd/worker         # run locally
+go build -o bin/worker ./cmd/worker
+```
+
+## Project Structure
+
+```
+oxygen/
+├── app/                          # Laravel application
+│   ├── Enums/VideoQuality.php    # Quality catalog (single source of truth)
+│   ├── Http/Controllers/         # Upload, manage, admin controllers
+│   ├── Jobs/SendWebhookJob.php   # Webhook delivery (3 retries)
+│   └── Models/                   # Eloquent models
+├── config/services.php           # Queue key config (env-overridable)
+├── golang-queue/                 # Standalone Go transcode worker
+│   ├── cmd/worker/main.go        # Entrypoint, goroutine pool
+│   ├── internal/
+│   │   ├── config/               # Env loading
+│   │   ├── queue/                # Redis consumer, job orchestration
+│   │   ├── db/                   # pgx queries (media_files only)
+│   │   ├── s3/                   # Source download + streaming upload
+│   │   ├── transcode/            # FFmpeg command builder + progress
+│   │   └── quality/              # Mirror of VideoQuality enum
+│   └── .env.example
+├── resources/js/                 # React frontend (Inertia pages)
+│   ├── pages/manage.tsx          # Upload UI + S3 multipart logic
+│   └── pages/admin/              # Profile, user, settings management
+└── routes/web.php                # Three-tier middleware groups
+```
