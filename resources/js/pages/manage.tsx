@@ -234,6 +234,7 @@ export default function Manage({
 
     const [uploadState, setUploadState] = useState<UploadState>('idle');
     const [uploadProgress, setUploadProgress] = useState(0);
+    const [uploadPartLabel, setUploadPartLabel] = useState('');
     const [uploadError, setUploadError] = useState<string | null>(null);
     const uploadIdRef = useRef<string | null>(null);
     const uploadKeyRef = useRef<string | null>(null);
@@ -284,6 +285,7 @@ export default function Manage({
         setUploadTab('file');
         setUploadState('idle');
         setUploadProgress(0);
+        setUploadPartLabel('');
         setUploadError(null);
         uploadIdRef.current = null;
         uploadKeyRef.current = null;
@@ -424,6 +426,11 @@ export default function Manage({
 
             nextPartRef.current = index + 1;
             setUploadProgress(Math.round((nextPartRef.current / total) * 100));
+            setUploadPartLabel(
+                nextPartRef.current < total
+                    ? `Uploading part ${nextPartRef.current + 1}/${total}`
+                    : `Uploaded ${total}/${total} parts`,
+            );
         }
 
         setUploadState('finalizing');
@@ -479,6 +486,7 @@ export default function Manage({
             Math.ceil(selectedFile.size / CHUNK_SIZE),
         );
         setUploadProgress(0);
+        setUploadPartLabel(`Uploading part 1/${totalPartsRef.current}`);
         setUploadErrors({});
         void runMultipartLoop();
     };
@@ -947,7 +955,7 @@ export default function Manage({
                                                             : uploadState ===
                                                                 'error'
                                                               ? 'Upload paused'
-                                                              : `Uploading part ${nextPartRef.current + 1}/${totalPartsRef.current}`}
+                                                              : uploadPartLabel}
                                                     </span>
                                                     <span className="font-medium">
                                                         {uploadProgress}%

@@ -2,6 +2,7 @@ import { usePage } from '@inertiajs/react';
 import {
     Activity,
     FolderKanban,
+    Radio,
     Settings,
     SlidersHorizontal,
     Users,
@@ -20,6 +21,7 @@ import {
     SidebarMenuItem,
 } from '@/components/ui/sidebar';
 import { manage, status } from '@/routes';
+import { index as indexOrgLiveStreams } from '@/routes/admin/organizations/live-streams';
 import { index as indexOrgProfiles } from '@/routes/admin/organizations/profiles';
 import { edit as editOrgSettings } from '@/routes/admin/organizations/settings';
 import { index as indexOrgUsers } from '@/routes/admin/organizations/users';
@@ -49,6 +51,11 @@ export function AppSidebar() {
     const adminNavItems: NavItem[] =
         isAdmin && orgId
             ? [
+                  {
+                      title: 'Live Streams',
+                      href: indexOrgLiveStreams({ organization: orgId }),
+                      icon: Radio,
+                  },
                   {
                       title: 'Users',
                       href: indexOrgUsers({ organization: orgId }),

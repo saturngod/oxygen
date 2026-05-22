@@ -1,8 +1,12 @@
 # Oxygen — Video Transcoding Platform
 
-A multi-tenant video transcoding service built with **Laravel 13 + Inertia v3 + React 19** on the web layer and a standalone **Go worker** for FFmpeg-based transcoding. Coordination happens through shared **Postgres**, **Redis**, and **S3** — the PHP and Go processes never call each other over HTTP.
+A multi-tenant video transcoding service built with **Laravel 13 + Inertia v3 + React 19** on the web layer, a standalone **Go worker** for FFmpeg-based transcoding, and a separate **Go live service** for live-stream runtime concerns. VOD transcoding coordinates through shared **Postgres**, **Redis**, and **S3**. Live streaming uses Laravel as the control plane and the Go live service for publish auth proxying, session callbacks, HLS serving, and viewer rollups.
 
 ## Architecture Overview
+
+Oxygen has two runtime paths: VOD transcoding and live streaming. Laravel is the control plane for both.
+
+VOD path:
 
 ```
 ┌──────────────┐      ┌──────────────┐      ┌──────────────┐
@@ -22,63 +26,36 @@ A multi-tenant video transcoding service built with **Laravel 13 + Inertia v3 + 
                      └───────────────┘
 ```
 
-```mermaid
-graph TB
-    subgraph "Browser (React + Inertia v3)"
-        B[Manage Page]
-        B -->|1. Init| INIT
-        B -->|2. PUT chunks| S3
-        B -->|3. Complete| COMP
-    end
+Live path:
 
-    subgraph "Laravel Application"
-        INIT[POST /multipart/init]
-        SIGN[POST /multipart/sign-part]
-        COMP[POST /multipart/complete]
-        ABORT[POST /multipart/abort]
-        WH_CONSUMER[webhooks:consume artisan command]
-        SEND_JOB[SendWebhookJob]
-    end
-
-    subgraph "Storage Layer"
-        REDIS[(Redis)]
-        PG[(Postgres)]
-        S3_SRC[S3 Source Bucket]
-        S3_DST[S3 Streaming Bucket]
-    end
-
-    subgraph "Go Worker (goroutine pool)"
-        WORKER[Consumer.Run]
-        TRANSCODE[ffmpeg subprocess]
-    end
-
-    subgraph "External"
-        EXT[Webhook Endpoint]
-    end
-
-    B -->|sign-part| SIGN
-    B -->|abort| ABORT
-    SIGN -->|presigned URL| B
-    B -.->|PUT chunk direct| S3_SRC
-
-    COMP -->|create MediaFile row| PG
-    COMP -->|LPUSH job payload| REDIS
-    COMP -->|LPUSH file_uploaded event| REDIS
-
-    REDIS -->|BRPOP job| WORKER
-    WORKER -->|download source| S3_SRC
-    WORKER -->|UPDATE status/progress| PG
-    WORKER --> TRANSCODE
-    TRANSCODE -->|upload HLS tree| S3_DST
-    WORKER -->|UPDATE success + streaming_url| PG
-    WORKER -->|LPUSH status event| REDIS
-
-    REDIS -->|BRPOP webhook events| WH_CONSUMER
-    WH_CONSUMER -->|dispatch to Laravel queue| REDIS
-    REDIS -->|queue:work picks up job| SEND_JOB
-    SEND_JOB -->|re-read Webhook model| PG
-    SEND_JOB -->|HTTP POST| EXT
 ```
+┌──────────────┐      ┌──────────────┐      ┌──────────────┐
+│     OBS      │─────▶│  golang-live │─────▶│ Browser      │
+│  Publisher   │      │ (RTMP + HLS) │      │ Player       │
+└──────┬───────┘      └──────┬───────┘      └──────┬───────┘
+       │                     │                     │
+       │  RTMP Publish       │    HLS Playback     │
+       └─────────────────────┤◄────────────────────┘
+                             │
+                     ┌───────▼───────┐
+                     │    Laravel    │
+                     │ (Auth + live  │
+                     │  callbacks +  │
+                     │  viewer rollup)│
+                     └───────────────┘
+```
+
+```mermaid
+graph LR
+    OBS[OBS Publisher] --> RTMP[golang-live<br/>RTMP ingest]
+    RTMP --> AUTH[Laravel<br/>publish auth + session callbacks]
+    RTMP --> HLS[golang-live<br/>HLS playlists + fMP4 parts]
+    HLS --> PLAYER[Browser player]
+    PLAYER --> ADMIN[Laravel<br/>admin UI + viewer rollups]
+    ADMIN --> CONTROL[golang-live<br/>restart/control]
+```
+
+Live streaming uses Laravel for stream records, encrypted keys, admin UI, and viewer metrics. The standalone Go live service handles RTMP ingest, validates publishers against Laravel, remuxes the stream into HLS, serves playback, and reports session and viewer state back to Laravel.
 
 ## Upload Flow (S3 Direct Multipart)
 
@@ -211,6 +188,131 @@ sequenceDiagram
 
 **Delivery guarantees**: 3 attempts with backoff `[5s, 30s, 120s]`. Webhooks are re-read from DB before each attempt — deactivating a webhook stops pending deliveries.
 
+## Live Streaming
+
+Live streams are managed from the Laravel admin UI and served by the standalone Go service in `golang-live/`.
+
+Laravel owns:
+
+- stream records, encrypted stream keys, statuses, restart flags, and viewer rollups
+- admin-only stream management under `admin/organizations/{organization}/live-streams`
+- internal callback endpoints under `internal/live/*`
+- control requests to the Go live service, such as stream restart
+
+The Go live service owns:
+
+- RTMP ingest on `LIVE_RTMP_ADDR`
+- publish auth proxying to Laravel
+- session start/end/fail callbacks to Laravel
+- HLS file serving from a local HLS root
+- viewer cookies, active viewer tracking, and minute rollup snapshots
+
+Live output is written as fMP4 HLS, not `.ts` files. Under `LIVE_HLS_ROOT`, each stream gets its own directory containing playlists like `index.m3u8` and media files like `*_init.mp4`, `*_segNN.mp4`, and `*_partNNN.mp4`.
+
+### Laravel Live Configuration
+
+Set these values in the Laravel `.env` file:
+
+```dotenv
+LIVE_RTMP_URL=rtmp://127.0.0.1:1935/live
+LIVE_RTMP_ADDR=:1935
+LIVE_HLS_URL=http://127.0.0.1:8081/live
+LIVE_SERVICE_TOKEN=change-me-live-service-token
+LIVE_CONTROL_URL=http://127.0.0.1:8081
+LIVE_CONTROL_TOKEN=change-me-live-control-token
+```
+
+`LIVE_SERVICE_TOKEN` must match the Go service value so Go can call Laravel `internal/live/*` endpoints with `X-Live-Service-Token`.
+
+`LIVE_CONTROL_TOKEN` must match the Go service value so Laravel can call Go control endpoints with `Authorization: Bearer ...`.
+
+After changing env or routes, run:
+
+```bash
+php artisan optimize:clear
+php artisan migrate
+php artisan wayfinder:generate
+```
+
+### Live Stream Setup
+
+1. Put the Laravel live settings above into `.env`.
+2. Configure the Go live service with the same `LIVE_SERVICE_TOKEN` and `LIVE_CONTROL_TOKEN`.
+3. Start Laravel and the Go live service:
+
+```bash
+composer run dev
+cd golang-live
+go run ./cmd/live
+```
+
+4. In the admin UI, open an organization and create a live stream.
+5. Copy the stream values from the live stream page:
+   - `Server`: `rtmp://127.0.0.1:1935/live`
+   - `Stream key`: `{public_id}?key={stream_key}`
+   - `M3U8 URL`: use the playback URL shown on the page
+6. In OBS, set `Keyframe Interval` to `2` seconds.
+7. Start streaming from OBS, then open the live stream page to watch the HLS playback.
+
+### Run The Go Live Service
+
+From `golang-live/`:
+
+```bash
+LIVE_ADDR=:8081 \
+LIVE_RTMP_ADDR=:1935 \
+LIVE_HLS_ROOT=/tmp/oxygen-live/hls \
+LARAVEL_URL=http://127.0.0.1:8000 \
+LIVE_SERVICE_TOKEN=change-me-live-service-token \
+LIVE_CONTROL_TOKEN=change-me-live-control-token \
+go run ./cmd/live
+```
+
+Build it with:
+
+```bash
+go build -o bin/live ./cmd/live
+```
+
+The service exposes:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /healthz` | Health check |
+| `RTMP :1935` | OBS/RTMP publish ingest |
+| `POST /ingest/auth` | Authenticates a publisher by proxying to Laravel |
+| `POST /sessions/start` | Starts a Laravel live session |
+| `POST /sessions/end` | Ends a Laravel live session |
+| `POST /sessions/fail` | Marks a Laravel live session failed |
+| `POST /streams/{publicID}/restart` | Control endpoint used by Laravel |
+| `GET /live/{publicID}/...` | Serves HLS playlists and fMP4 media parts |
+
+### Local Live Stream Flow
+
+1. Start Laravel with `composer run dev`.
+2. Start `golang-live` with matching `LIVE_SERVICE_TOKEN` and `LIVE_CONTROL_TOKEN`.
+3. In the admin UI, open an organization and create a live stream.
+4. Use the stream's `public_id` as the stream path and its generated stream key as the secret credential.
+5. Publish from OBS to the copied server and stream key.
+6. Open the stream show page to watch HLS playback and viewer metrics.
+
+For RTMP clients that accept a single stream key field, the publish name is:
+
+```text
+{public_id}?key={stream_key}
+```
+
+For example, with `LIVE_RTMP_URL=rtmp://127.0.0.1:1935/live`, OBS-style settings are:
+
+```text
+Server:     rtmp://127.0.0.1:1935/live
+Stream key: 01ks8n3cs82yj3ksf4p57z4ykg?key=6rIHIKXFoBsEx1y0mt2zNDFsNDafNbcW6HgKCjnmKMEcKu4A
+```
+
+The raw secret key is only the value after `?key=`. The value before `?key=` is the stream path / public id.
+
+The Go live service accepts the OBS RTMP publish, validates the publish name against Laravel, starts the live session, remuxes the RTMP media into HLS, and sends the session end callback when OBS disconnects.
+
 ## Quality & Profile System
 
 Each organization defines **profiles** — named sets of quality levels. When a file is uploaded, the profile's qualities are **snapshotted** into `media_file_profiles`, so editing a profile later doesn't affect in-flight or completed jobs.
@@ -310,6 +412,7 @@ Every layer enforces org isolation:
 | Frontend | React 19 + Inertia v3 + Tailwind v4 |
 | UI components | shadcn/ui (Radix) + Lucide icons |
 | Transcode worker | Go 1.25 (standalone binary) |
+| Live service | Go 1.25 (standalone HTTP service) |
 | Transcoding | FFmpeg (subprocess) — VideoToolbox / NVENC / libx264 |
 | Database | Postgres (shared between Laravel & Go) |
 | Queue | Redis (raw LPUSH/BRPOP, not Laravel Queues) |
@@ -326,6 +429,12 @@ composer run dev            # php serve + queue:listen + pail + vite dev
 cp .env.example .env        # configure DATABASE_URL, REDIS_ADDR, AWS creds
 go run ./cmd/worker         # run locally
 go build -o bin/worker ./cmd/worker
+
+# Go live service (from golang-live/)
+LIVE_SERVICE_TOKEN=change-me-live-service-token \
+LIVE_CONTROL_TOKEN=change-me-live-control-token \
+go run ./cmd/live
+go build -o bin/live ./cmd/live
 ```
 
 ## Project Structure
@@ -348,8 +457,13 @@ oxygen/
 │   │   ├── transcode/            # FFmpeg command builder + progress
 │   │   └── quality/              # Mirror of VideoQuality enum
 │   └── .env.example
+├── golang-live/                  # Standalone Go live-stream service
+│   ├── cmd/live/main.go          # HTTP server entrypoint
+│   └── internal/
+│       ├── config/               # Env loading
+│       └── server/               # Control, callbacks, HLS, viewer tracking
 ├── resources/js/                 # React frontend (Inertia pages)
 │   ├── pages/manage.tsx          # Upload UI + S3 multipart logic
-│   └── pages/admin/              # Profile, user, settings management
+│   └── pages/admin/              # Profile, user, settings, live stream management
 └── routes/web.php                # Three-tier middleware groups
 ```

@@ -1,10 +1,10 @@
 import { Head, setLayoutProps } from '@inertiajs/react';
 import { MoreHorizontal, Plus } from 'lucide-react';
 import { useState } from 'react';
+import { ControlFilter } from '@/components/control-filter';
 import Heading from '@/components/heading';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { ControlFilter } from '@/components/control-filter';
 import {
     DropdownMenu,
     DropdownMenuContent,

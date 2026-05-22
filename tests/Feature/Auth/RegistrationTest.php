@@ -28,7 +28,7 @@ test('new users can register and become organization admin', function () {
     ]);
 
     $this->assertAuthenticated();
-    $response->assertRedirect(route('dashboard', absolute: false));
+    $response->assertRedirect('/manage');
 
     $user = User::where('email', 'test@example.com')->first();
     $organization = Organization::where('name', 'Acme Inc.')->first();

@@ -1,4 +1,4 @@
-import { Form, Head, setLayoutProps, usePage } from '@inertiajs/react';
+import { Form, Head, setLayoutProps } from '@inertiajs/react';
 import OrganizationSettingsController from '@/actions/App/Http/Controllers/Admin/OrganizationSettingsController';
 import Heading from '@/components/heading';
 import InputError from '@/components/input-error';
@@ -6,7 +6,6 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { edit as editOrgSettings } from '@/routes/admin/organizations/settings';
-import type { SharedData } from '@/types';
 
 export default function OrganizationSettings({
     organization,
@@ -20,8 +19,6 @@ export default function OrganizationSettings({
         address: string | null;
     };
 }) {
-    const { auth } = usePage<SharedData>().props;
-
     setLayoutProps({
         breadcrumbs: [
             {

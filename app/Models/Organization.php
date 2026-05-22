@@ -35,6 +35,11 @@ class Organization extends Model
         return $this->hasMany(Webhook::class);
     }
 
+    public function liveStreams(): HasMany
+    {
+        return $this->hasMany(LiveStream::class);
+    }
+
     public function hasUserWithRole(User $user, OrganizationRole $role): bool
     {
         return $this->users()

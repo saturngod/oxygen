@@ -40,4 +40,12 @@ return [
         'webhook_queue_key' => env('TRANSCODE_WEBHOOK_QUEUE_KEY', 'queues:transcode:webhooks'),
     ],
 
+    'live' => [
+        'rtmp_url' => env('LIVE_RTMP_URL', 'rtmp://127.0.0.1:1935/live'),
+        'hls_url' => env('LIVE_HLS_URL', 'http://127.0.0.1:8081/live'),
+        'service_token' => env('LIVE_SERVICE_TOKEN'),
+        'control_url' => env('LIVE_CONTROL_URL'),
+        'control_token' => env('LIVE_CONTROL_TOKEN'),
+    ],
+
 ];

@@ -51,11 +51,13 @@ export default function CreateProfile({
 
     const grouped = useMemo(() => {
         const groups = new Map<string, Quality[]>();
+
         for (const quality of qualities) {
             const list = groups.get(quality.category) ?? [];
             list.push(quality);
             groups.set(quality.category, list);
         }
+
         return CATEGORY_ORDER.filter((category) => groups.has(category)).map(
             (category) => ({
                 category,
@@ -135,7 +137,9 @@ export default function CreateProfile({
                                     {grouped.map(({ category, items }) => (
                                         <Card key={category} size="sm">
                                             <CardHeader>
-                                                <CardTitle>{category}</CardTitle>
+                                                <CardTitle>
+                                                    {category}
+                                                </CardTitle>
                                             </CardHeader>
                                             <CardContent className="flex flex-col gap-2">
                                                 {items.map((quality) => {
@@ -143,6 +147,7 @@ export default function CreateProfile({
                                                         selected.includes(
                                                             quality.value,
                                                         );
+
                                                     return (
                                                         <label
                                                             key={quality.value}

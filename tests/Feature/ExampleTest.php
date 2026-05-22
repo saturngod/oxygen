@@ -1,7 +1,7 @@
 <?php
 
 test('returns a successful response', function () {
-    $response = $this->get(route('home'));
+    $response = $this->get('/');
 
-    $response->assertOk();
+    $response->assertRedirect('/manage');
 });
