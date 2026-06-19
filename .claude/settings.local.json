@@ -14,7 +14,8 @@
       "Bash(npm run:*)",
       "Bash(go build *)",
       "Bash(npx eslint *)",
-      "Bash(npx prettier *)"
+      "Bash(npx prettier *)",
+      "Bash(go vet *)"
     ]
   },
   "enableAllProjectMcpServers": true,
