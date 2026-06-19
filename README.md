@@ -132,7 +132,7 @@ composer run dev
 
 This runs the web server (`http://127.0.0.1:8000`), the queue worker, log tailing (`pail`), and Vite — all in one terminal.
 
-> Running under **Laravel Octane / FrankenPHP** instead? Replace the web server with `php artisan octane:start --max-requests=500` (still run the queue worker, webhook consumer, and Go services separately). See the Octane notes in `CLAUDE.md`.
+> Running under **Laravel Octane / FrankenPHP** instead? Use `composer run dev:octane` (octane with `--watch` + queue + logs + vite), or run `php artisan octane:start --max-requests=500` standalone. Either way, still run the webhook consumer and Go services separately. See the Octane notes in `CLAUDE.md`.
 
 ### Step 3 — Start the webhook consumer (new terminal)
 
