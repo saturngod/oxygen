@@ -57,6 +57,140 @@ graph LR
 
 Live streaming uses Laravel for stream records, encrypted keys, admin UI, and viewer metrics. The standalone Go live service handles RTMP ingest, validates publishers against Laravel, remuxes the stream into HLS, serves playback, and reports session and viewer state back to Laravel.
 
+## Running Locally — Step by Step
+
+Oxygen is **not a single process**. A full local stack runs the Laravel web app plus several long-running workers and two standalone Go services. This section walks through every piece.
+
+### What runs, and why
+
+| # | Process | Command | Needed for |
+|---|---------|---------|-----------|
+| 1 | Laravel web (HTTP) | `php artisan serve` (or Octane) | The app UI + API |
+| 2 | Vite dev server | `npm run dev` | Frontend hot reload (dev only) |
+| 3 | Laravel queue worker | `php artisan queue:listen` | Webhook delivery jobs, mail, etc. |
+| 4 | Webhook consumer | `php artisan webhooks:consume` | Turns Go/Laravel webhook events into delivery jobs |
+| 5 | Go transcode worker | `go run ./cmd/worker` (in `golang-queue/`) | VOD transcoding (ffmpeg → HLS) |
+| 6 | Go live service | `go run ./cmd/live` (in `golang-live/`) | Live streaming (RTMP ingest + HLS) |
+
+`composer run dev` bundles **1–3 + logs** into one command. **4, 5, and 6 are always separate.** Skip 6 if you are not using live streaming.
+
+### Prerequisites
+
+Install these first:
+
+- **PHP 8.4** + **Composer**
+- **Node 20+** + **npm**
+- **Go 1.25+**
+- **FFmpeg** (`ffmpeg` + `ffprobe` on `PATH`) — required by the transcode worker
+- **PostgreSQL** — shared by Laravel and both Go services
+- **Redis** — job + webhook queues
+- **S3** — an AWS bucket, or MinIO locally (separate source + streaming buckets recommended)
+
+### Step 1 — Configure and set up the Laravel app
+
+```bash
+# from the repo root (oxygen/)
+composer run setup     # installs deps, copies .env, generates key, migrates, builds frontend
+```
+
+Then edit `.env` and set at least:
+
+```dotenv
+# Database (shared with the Go services)
+DB_CONNECTION=pgsql
+DB_HOST=127.0.0.1
+DB_PORT=5432
+DB_DATABASE=oxygen
+DB_USERNAME=postgres
+DB_PASSWORD=secret
+
+# Redis
+REDIS_HOST=127.0.0.1
+REDIS_PORT=6379
+
+# S3 (source uploads + streaming output)
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_DEFAULT_REGION=us-east-1
+AWS_BUCKET=oxygen-source
+
+# Live streaming (must match the golang-live env — see Live Streaming section)
+LIVE_RTMP_URL=rtmp://127.0.0.1:1935/live
+LIVE_HLS_URL=http://127.0.0.1:8081/live
+LIVE_SERVICE_TOKEN=change-me-live-service-token
+LIVE_CONTROL_URL=http://127.0.0.1:8081
+LIVE_CONTROL_TOKEN=change-me-live-control-token
+```
+
+Re-run migrations if you set up the DB after `setup`: `php artisan migrate`.
+
+### Step 2 — Start the core Laravel stack
+
+```bash
+composer run dev
+```
+
+This runs the web server (`http://127.0.0.1:8000`), the queue worker, log tailing (`pail`), and Vite — all in one terminal.
+
+> Running under **Laravel Octane / FrankenPHP** instead? Replace the web server with `php artisan octane:start --max-requests=500` (still run the queue worker, webhook consumer, and Go services separately). See the Octane notes in `CLAUDE.md`.
+
+### Step 3 — Start the webhook consumer (new terminal)
+
+```bash
+php artisan webhooks:consume
+```
+
+This drains webhook events (pushed by the Go worker and Laravel) and dispatches `SendWebhookJob`s. Skip if you are not using webhooks.
+
+### Step 4 — Start the Go transcode worker (new terminal)
+
+```bash
+cd golang-queue
+cp .env.example .env     # first time only
+# edit .env: REDIS_ADDR, QUEUE_KEY, DB_*, AWS_* / SOURCE_AWS_* / STREAMING_AWS_*, FFMPEG_BIN
+go run ./cmd/worker
+```
+
+Key env values (see `golang-queue/.env.example` for the full list):
+
+```dotenv
+REDIS_ADDR=127.0.0.1:6379
+QUEUE_KEY=oxygen-database-queues:transcode   # must match Laravel's queue key
+DB_HOST=127.0.0.1
+DB_DATABASE=oxygen
+SOURCE_AWS_BUCKET=oxygen-source
+STREAMING_AWS_BUCKET=oxygen-streaming
+FFMPEG_BIN=ffmpeg
+```
+
+The worker BRPOPs from `QUEUE_KEY`, reads the profile from Postgres, runs ffmpeg, and uploads the HLS tree to the streaming bucket.
+
+### Step 5 — Start the Go live service (new terminal, optional)
+
+Only needed for live streaming. Tokens **must match** the Laravel `.env` from Step 1.
+
+```bash
+cd golang-live
+LIVE_ADDR=:8081 \
+LIVE_RTMP_ADDR=:1935 \
+LIVE_HLS_ROOT=/tmp/oxygen-live/hls \
+LARAVEL_URL=http://127.0.0.1:8000 \
+LIVE_SERVICE_TOKEN=change-me-live-service-token \
+LIVE_CONTROL_TOKEN=change-me-live-control-token \
+go run ./cmd/live
+```
+
+See [Live Streaming](#live-streaming) for the OBS setup and full endpoint list.
+
+### Step 6 — Verify
+
+1. Open `http://127.0.0.1:8000` and register (creates an org and logs you in as admin).
+2. Upload a video under **Manage** — it goes straight to S3, then a job lands on Redis.
+3. Watch the **Go transcode worker** terminal pick it up; the file status moves `uploaded → progress → success`.
+4. For live: create a live stream in the admin UI, point OBS at it, and watch playback.
+
+---
+
 ## Upload Flow (S3 Direct Multipart)
 
 The browser uploads directly to S3. The Laravel app never proxies file bytes — it only issues presigned URLs and records metadata.
@@ -420,10 +554,13 @@ Every layer enforces org isolation:
 
 ## Development
 
+For a full step-by-step run guide (all processes, env, verification), see [Running Locally — Step by Step](#running-locally--step-by-step). Quick reference:
+
 ```bash
 # Laravel app
 composer run setup          # first-time: install, migrate, build
 composer run dev            # php serve + queue:listen + pail + vite dev
+php artisan webhooks:consume # webhook delivery (separate terminal)
 
 # Go worker (from golang-queue/)
 cp .env.example .env        # configure DATABASE_URL, REDIS_ADDR, AWS creds
@@ -435,6 +572,25 @@ LIVE_SERVICE_TOKEN=change-me-live-service-token \
 LIVE_CONTROL_TOKEN=change-me-live-control-token \
 go run ./cmd/live
 go build -o bin/live ./cmd/live
+```
+
+### Production web server (Laravel Octane / FrankenPHP)
+
+The app ships with Octane (`OCTANE_SERVER=frankenphp`). Instead of `php artisan serve`:
+
+```bash
+php artisan octane:start --max-requests=500   # serve via FrankenPHP
+php artisan octane:reload                      # reload workers after deploy
+```
+
+The queue worker, webhook consumer, and both Go services still run as separate processes. See `CLAUDE.md` for Octane state-safety rules.
+
+### Verify changes
+
+```bash
+composer ci:check           # lint + format + types + tests (Laravel)
+cd golang-queue && go test ./...
+cd golang-live && go test ./...
 ```
 
 ## Project Structure
