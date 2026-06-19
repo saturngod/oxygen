@@ -9,14 +9,15 @@ import (
 )
 
 type Config struct {
-	Addr           string
-	RTMPAddr       string
-	HLSRoot        string
-	LaravelURL     string
-	ServiceToken   string
-	ControlToken   string
-	ViewerTTL      time.Duration
-	RollupInterval time.Duration
+	Addr                 string
+	RTMPAddr             string
+	HLSRoot              string
+	LaravelURL           string
+	ServiceToken         string
+	ControlToken         string
+	AllowInsecureControl bool
+	ViewerTTL            time.Duration
+	RollupInterval       time.Duration
 }
 
 func Load() Config {
@@ -24,14 +25,31 @@ func Load() Config {
 	loadDotEnv("../.env")
 
 	return Config{
-		Addr:           getenv("LIVE_ADDR", ":8081"),
-		RTMPAddr:       getenv("LIVE_RTMP_ADDR", ":1935"),
-		HLSRoot:        getenv("LIVE_HLS_ROOT", "/tmp/oxygen-live/hls"),
-		LaravelURL:     strings.TrimRight(getenv("LARAVEL_URL", "http://127.0.0.1:8000"), "/"),
-		ServiceToken:   getenv("LIVE_SERVICE_TOKEN", ""),
-		ControlToken:   getenv("LIVE_CONTROL_TOKEN", ""),
-		ViewerTTL:      secondsEnv("VIEWER_TTL_SECONDS", 45),
-		RollupInterval: secondsEnv("ROLLUP_INTERVAL_SECONDS", 15),
+		Addr:                 getenv("LIVE_ADDR", ":8081"),
+		RTMPAddr:             getenv("LIVE_RTMP_ADDR", ":1935"),
+		HLSRoot:              getenv("LIVE_HLS_ROOT", "/tmp/oxygen-live/hls"),
+		LaravelURL:           strings.TrimRight(getenv("LARAVEL_URL", "http://127.0.0.1:8000"), "/"),
+		ServiceToken:         getenv("LIVE_SERVICE_TOKEN", ""),
+		ControlToken:         getenv("LIVE_CONTROL_TOKEN", ""),
+		AllowInsecureControl: boolEnv("LIVE_ALLOW_INSECURE_CONTROL", false),
+		ViewerTTL:            secondsEnv("VIEWER_TTL_SECONDS", 45),
+		RollupInterval:       secondsEnv("ROLLUP_INTERVAL_SECONDS", 15),
+	}
+}
+
+func boolEnv(key string, fallback bool) bool {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+
+	switch strings.ToLower(raw) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
 	}
 }
 

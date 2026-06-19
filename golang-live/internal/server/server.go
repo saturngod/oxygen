@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +21,14 @@ import (
 
 	"oxygen/live/internal/config"
 )
+
+// publicIDPattern restricts stream identifiers to filesystem- and URL-safe
+// characters so they can never be used to traverse outside HLSRoot.
+var publicIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+
+func validPublicID(id string) bool {
+	return publicIDPattern.MatchString(id)
+}
 
 type Server struct {
 	cfg     config.Config
@@ -34,6 +44,49 @@ type liveSession struct {
 	publicID  string
 	sessionID string
 	muxer     *gohlslib.Muxer
+	conn      net.Conn
+
+	mu     sync.RWMutex
+	closed bool
+}
+
+// handle serves an HLS request from the live muxer. It returns false if the
+// session has already been torn down, so the caller can fall back to disk.
+// The read lock is held for the duration of the muxer call, which is what
+// makes it safe against a concurrent close() / muxer.Close().
+func (ls *liveSession) handle(w http.ResponseWriter, r *http.Request) bool {
+	ls.mu.RLock()
+	defer ls.mu.RUnlock()
+
+	if ls.closed {
+		return false
+	}
+
+	ls.muxer.Handle(w, r)
+
+	return true
+}
+
+// close shuts the muxer down exactly once, blocking until no viewer request is
+// mid-flight (via the same RWMutex handle() uses).
+func (ls *liveSession) close() {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+
+	if ls.closed {
+		return
+	}
+
+	ls.closed = true
+	ls.muxer.Close()
+}
+
+// disconnect closes the underlying RTMP connection, which unblocks the read
+// loop and drives the normal teardown path.
+func (ls *liveSession) disconnect() {
+	if ls.conn != nil {
+		_ = ls.conn.Close()
+	}
 }
 
 func New(cfg config.Config, log *slog.Logger) *Server {
@@ -170,14 +223,21 @@ func (s *Server) restart(w http.ResponseWriter, r *http.Request) {
 
 	publicID := r.PathValue("publicID")
 
-	// The RTMP accept loop should observe this control command and disconnect
-	// the active publisher. Until that loop is attached, this endpoint records
-	// the request and returns accepted so Laravel can move the stream state.
-	s.log.Info("restart requested", "public_id", publicID)
+	// Disconnect the active publisher (if any) so the rotated key/new settings
+	// take effect immediately. Closing the connection unblocks the RTMP read
+	// loop, which runs the normal session teardown and end callbacks.
+	disconnected := false
+	if session := s.getLiveSession(publicID); session != nil {
+		session.disconnect()
+		disconnected = true
+	}
+
+	s.log.Info("restart requested", "public_id", publicID, "disconnected", disconnected)
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
-		"ok":        true,
-		"public_id": publicID,
+		"ok":           true,
+		"public_id":    publicID,
+		"disconnected": disconnected,
 	})
 }
 
@@ -193,6 +253,11 @@ func (s *Server) hls(w http.ResponseWriter, r *http.Request) {
 	}
 
 	publicID := r.PathValue("publicID")
+	if !validPublicID(publicID) {
+		http.NotFound(w, r)
+		return
+	}
+
 	rel := strings.TrimPrefix(r.URL.Path, "/live/"+publicID+"/")
 	clean := filepath.Clean(rel)
 
@@ -205,11 +270,21 @@ func (s *Server) hls(w http.ResponseWriter, r *http.Request) {
 	s.tracker.Observe(publicID, viewerID, clean, time.Now())
 
 	if session := s.getLiveSession(publicID); session != nil {
-		session.muxer.Handle(&noStoreResponseWriter{ResponseWriter: w}, r)
+		if session.handle(&noStoreResponseWriter{ResponseWriter: w}, r) {
+			return
+		}
+	}
+
+	streamRoot := filepath.Join(s.cfg.HLSRoot, publicID)
+	path := filepath.Join(streamRoot, clean)
+
+	// Defence-in-depth: ensure the resolved path is still contained in the
+	// stream's directory even if clean/publicID combined in an unexpected way.
+	if path != streamRoot && !strings.HasPrefix(path, streamRoot+string(os.PathSeparator)) {
+		http.NotFound(w, r)
 		return
 	}
 
-	path := filepath.Join(s.cfg.HLSRoot, publicID, clean)
 	if _, err := os.Stat(path); err != nil {
 		http.NotFound(w, r)
 		return
@@ -296,10 +371,21 @@ func (s *Server) flushSnapshots(ctx context.Context, now time.Time) {
 
 func (s *Server) authorizeControl(w http.ResponseWriter, r *http.Request) bool {
 	if s.cfg.ControlToken == "" {
-		return true
+		// Fail closed by default: an unset control token must not silently
+		// expose the control plane. Opt in to insecure mode explicitly for dev.
+		if s.cfg.AllowInsecureControl {
+			return true
+		}
+
+		s.log.Warn("control request denied: LIVE_CONTROL_TOKEN is not set")
+		http.Error(w, "control token not configured", http.StatusForbidden)
+		return false
 	}
 
-	if r.Header.Get("Authorization") != "Bearer "+s.cfg.ControlToken {
+	expected := []byte("Bearer " + s.cfg.ControlToken)
+	provided := []byte(r.Header.Get("Authorization"))
+
+	if subtle.ConstantTimeCompare(expected, provided) != 1 {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return false
 	}
@@ -358,6 +444,10 @@ func randomHex(bytesLen int) string {
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, out any) bool {
 	defer r.Body.Close()
+
+	// Bound the request body so a malicious or buggy caller cannot stream an
+	// unbounded payload into the control plane.
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 
 	if err := json.NewDecoder(r.Body).Decode(out); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)

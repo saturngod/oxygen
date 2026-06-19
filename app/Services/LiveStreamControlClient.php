@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\LiveStream;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 
 class LiveStreamControlClient
@@ -22,8 +23,14 @@ class LiveStreamControlClient
             $request = $request->withToken($token);
         }
 
-        return $request
-            ->post(rtrim($baseUrl, '/').'/streams/'.$liveStream->public_id.'/restart')
-            ->successful();
+        try {
+            return $request
+                ->post(rtrim($baseUrl, '/').'/streams/'.$liveStream->public_id.'/restart')
+                ->successful();
+        } catch (ConnectionException) {
+            // Live service unreachable/timed out: report failure to the caller
+            // instead of bubbling a 500 up to the admin.
+            return false;
+        }
     }
 }

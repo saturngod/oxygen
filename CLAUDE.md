@@ -1,6 +1,15 @@
-# Oxygen — Video Transcoding Platform
+# CLAUDE.md
 
-Laravel 13 + Inertia v3 + React 19 + Tailwind v4 app with a separate Go transcoding worker (`golang-queue/`). The Laravel app handles uploads and management; the Go worker consumes jobs from Redis and runs ffmpeg.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+# Oxygen — Video Transcoding & Live Streaming Platform
+
+Laravel 13 + Inertia v3 + React 19 + Tailwind v4 web app plus **two independent Go services**:
+
+- `golang-queue/` — VOD transcode worker. Consumes jobs from Redis, runs ffmpeg, writes HLS to S3.
+- `golang-live/` — Live streaming service. Ingests RTMP, remuxes to live HLS (fMP4), tracks viewers. Controlled by Laravel via callbacks.
+
+The Laravel app is the control plane (uploads, management, auth, session/viewer bookkeeping). Each Go service is its own Go module with its own `go.mod`, `.env.example`, and `CLAUDE.md`.
 
 ## Dev Environment
 
@@ -41,13 +50,18 @@ Import Wayfinder functions from `@/actions/` (controllers) or `@/routes/` (named
 
 ## Key Enums (Single Source of Truth)
 
-- `App\Enums\VideoQuality` — 7 cases (Sd240p–Uhd2160p) with width/height/bitrate. **Both the frontend and the Go worker must mirror this enum.** If you change it, update all three in the same PR.
+- `App\Enums\VideoQuality` — 7 cases (Sd240p–Uhd2160p) with width/height/bitrate. **The frontend, the Go transcode worker, AND the Go live service must all mirror this enum.** If you change it, update all four in the same PR (PHP enum, `resources/js`, `golang-queue/internal/quality`, `golang-live`).
 - `App\Enums\MediaFileStatus` — `uploaded`, `progress`, `success`, `failed`.
 - `App\Enums\OrganizationRole` — `admin`, `operator`.
+- `App\Enums\LiveStreamStatus` — `idle`, `live`, `offline`, `restarting`, `failed`, `disabled` (has `label()`).
+- `App\Enums\LiveStreamSessionStatus` — `starting`, `live`, `ended`, `failed`.
+- `App\Enums\WebhookEvent` — `file_uploaded`, `file_status_changed` (has `label()`).
 
 ## Models
 
-`User`, `Organization` (belongsToMany via `organization_user` pivot with `role`), `Folder`, `MediaFile`, `MediaFileProfile`, `Profile`.
+`User`, `Organization` (belongsToMany via `organization_user` pivot with `role`), `Folder`, `MediaFile`, `MediaFileProfile`, `Profile`, `Webhook`.
+
+Live streaming: `LiveStream` (owns stream, encrypted `stream_key`, status, restart flags), `LiveStreamSession` (one broadcast session: status, hls_url, viewer/segment metrics), `LiveStreamViewerRollup` (minute-level viewer snapshots).
 
 ## Organizations & Multi-Tenancy
 
@@ -71,7 +85,9 @@ Three concentric groups — pick the right one, do not duplicate checks in contr
 
 1. **`auth` + `verified`** — only `PUT organizations/{organization}/switch` sits here directly.
 2. **`EnsureOrganizationMember`** (nested in 1) — normal app surface: dashboard, manage/*, status.
-3. **`EnsureOrganizationAdmin`** (nested in 1) — `admin/organizations/{organization}/*`: settings, users, profiles.
+3. **`EnsureOrganizationAdmin`** (nested in 1) — `admin/organizations/{organization}/*`: settings, users, profiles, webhooks, **live-streams** (list/create/show/update + `rotate-key`/`restart`/`disable`).
+
+Plus one **unauthenticated** group: `/internal/live/*` — service-to-service callbacks from `golang-live` (`auth-publish`, `session-started`, `session-ended`, `session-failed`, `recover-active`, `viewer-snapshot`), handled by `LiveStreamServiceController`. These are authenticated by a shared service token, not session auth — never add `auth` middleware here.
 
 ### Registration gate
 
@@ -101,19 +117,35 @@ Each org has many `Profile` rows (uuid, `organization_id`, `name`, `qualities` j
 - Admin-only routes under `admin/organizations/{organization}/profiles*`.
 - Frontend: `resources/js/pages/admin/profiles/` — use design tokens, not hardcoded colors.
 
-## Go Worker (`golang-queue/`)
+## Live Streaming (Laravel + `golang-live/`)
+
+OBS/publisher → `golang-live` (RTMP ingest) → live HLS (fMP4) playback. Laravel is the control plane; `golang-live` does the media work.
+
+Flow:
+
+1. Admin creates a `LiveStream` (gets RTMP URL + encrypted stream key) under `admin/organizations/{org}/live-streams`.
+2. Publisher pushes RTMP to `golang-live`, which calls Laravel `POST /internal/live/auth-publish` to validate the key and resolve the org/stream.
+3. `golang-live` reports lifecycle via `session-started` / `session-ended` / `session-failed`, creating/updating `LiveStreamSession` rows.
+4. Viewer presence is sampled and flushed to `viewer-snapshot`, persisted as `LiveStreamViewerRollup` (minute-level).
+
+Laravel side: `OrganizationLiveStreamsController` (admin CRUD), `LiveStreamServiceController` (internal callbacks), `LiveStreamControlClient` + `LiveStreamEndpointService` (talk to `golang-live`). Frontend: `resources/js/pages/admin/live-streams/`.
+
+**Security**: `/internal/live/*` trusts only the shared service token + the stream key it validates; always re-check `organization_id` on session/viewer writes.
+
+## Go Transcode Worker (`golang-queue/`)
 
 Standalone Go binary (not part of PHP runtime). Talks to shared Postgres + Redis + S3.
 
-- Entry: `cmd/worker/main.go`
-- Consumes from Redis list `queues:transcode` (BRPOP)
-- Reads profile from Postgres (does not trust job payload for qualities)
-- Cross-checks `organization_id` for isolation
-- Single ffmpeg invocation per job (all renditions + master playlist)
-- Writes progress to `media_files` table; uploads HLS tree to S3
+- Entry: `cmd/worker/main.go`; `WORKER_CONCURRENCY` goroutines (default 1).
+- Consumes from Redis list `QUEUE_KEY` (default `oxygen-database-queues:transcode`) via BRPOP.
+- Reads profile from Postgres (does not trust job payload for qualities).
+- Cross-checks `organization_id` for isolation.
+- Single ffmpeg invocation per job (`-filter_complex` + `split`, all renditions + master playlist — never loop per-bitrate).
+- Writes progress to `media_files` table; uploads HLS tree to S3 (separate source vs. streaming buckets via `SOURCE_AWS_*` / `STREAMING_AWS_*`).
+- Pushes webhook events to `{QUEUE_KEY}:webhooks` for Laravel to deliver (3 attempts, backoff `[5s, 30s, 120s]`).
 - Run: `go run ./cmd/worker` | Build: `go build -o bin/worker ./cmd/worker` | Test: `go test ./...`
 
-See `golang-queue/PLAN.md` for full system design, `golang-queue/CLAUDE.md` for Go-specific conventions.
+See `golang-queue/PLAN.md` for full system design, `golang-queue/CLAUDE.md` for Go-specific conventions. `golang-live/` has its own `README.md` and uses `gohlslib/v2` (HLS muxing) + `gortmplib` (RTMP ingest).
 
 ## Frontend Conventions
 

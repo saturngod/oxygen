@@ -71,17 +71,27 @@ class LiveStreamServiceController extends Controller
         $liveStream = $this->findStream($validated['public_id']);
 
         $session = DB::transaction(function () use ($liveStream, $validated): LiveStreamSession {
-            $session = $liveStream->sessions()->create([
+            // Lock the row so two near-simultaneous publishers cannot both create
+            // a session and clobber active_session_id.
+            $locked = LiveStream::query()
+                ->whereKey($liveStream->getKey())
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            abort_if($locked->status === LiveStreamStatus::Disabled, 403, 'Live stream is disabled.');
+            abort_unless($locked->active_session_id === null, 409, 'Live stream already has an active session.');
+
+            $session = $locked->sessions()->create([
                 'external_id' => $validated['external_id'] ?? null,
                 'status' => LiveStreamSessionStatus::Live,
-                'settings_version' => $liveStream->settings_version,
-                'recording_enabled' => $liveStream->recording_enabled,
-                'hls_url' => $validated['hls_url'] ?? $liveStream->hls_url,
+                'settings_version' => $locked->settings_version,
+                'recording_enabled' => $locked->recording_enabled,
+                'hls_url' => $validated['hls_url'] ?? $locked->hls_url,
                 'hls_prefix' => $validated['hls_prefix'] ?? null,
                 'started_at' => now(),
             ]);
 
-            $liveStream->forceFill([
+            $locked->forceFill([
                 'status' => LiveStreamStatus::Live,
                 'active_session_id' => $session->id,
                 'last_started_at' => $session->started_at,
@@ -125,11 +135,7 @@ class LiveStreamServiceController extends Controller
                 'ended_at' => now(),
             ])->save();
 
-            $liveStream->forceFill([
-                'status' => LiveStreamStatus::Offline,
-                'active_session_id' => null,
-                'last_ended_at' => $session->ended_at,
-            ])->save();
+            $this->closeStreamIfActive($liveStream, $session, LiveStreamStatus::Offline);
         });
 
         return response()->json(['ok' => true]);
@@ -156,11 +162,7 @@ class LiveStreamServiceController extends Controller
                 'ended_at' => now(),
             ])->save();
 
-            $liveStream->forceFill([
-                'status' => LiveStreamStatus::Failed,
-                'active_session_id' => null,
-                'last_ended_at' => $session->ended_at,
-            ])->save();
+            $this->closeStreamIfActive($liveStream, $session, LiveStreamStatus::Failed);
         });
 
         return response()->json(['ok' => true]);
@@ -171,9 +173,11 @@ class LiveStreamServiceController extends Controller
         $this->authorizeService($request);
 
         $recovered = DB::transaction(function (): int {
+            // No whereNotNull filter: a stream stuck Live/Restarting with a null
+            // active_session_id must also be forced Offline, otherwise authPublish
+            // keeps rejecting it as already-live forever.
             $liveStreams = LiveStream::query()
                 ->whereIn('status', [LiveStreamStatus::Live, LiveStreamStatus::Restarting])
-                ->whereNotNull('active_session_id')
                 ->lockForUpdate()
                 ->get();
 
@@ -264,6 +268,29 @@ class LiveStreamServiceController extends Controller
         $provided = $request->header('X-Live-Service-Token', '');
 
         abort_unless(hash_equals($expected, $provided), 403);
+    }
+
+    /**
+     * Only flip the stream's lifecycle state when the reporting session is still
+     * the active one. A late callback for a superseded session must update its own
+     * row but must not knock a newer, currently-live session offline.
+     */
+    private function closeStreamIfActive(LiveStream $liveStream, LiveStreamSession $session, LiveStreamStatus $status): void
+    {
+        $locked = LiveStream::query()
+            ->whereKey($liveStream->getKey())
+            ->lockForUpdate()
+            ->firstOrFail();
+
+        if ($locked->active_session_id !== $session->id) {
+            return;
+        }
+
+        $locked->forceFill([
+            'status' => $status,
+            'active_session_id' => null,
+            'last_ended_at' => $session->ended_at,
+        ])->save();
     }
 
     private function findStream(string $publicId): LiveStream

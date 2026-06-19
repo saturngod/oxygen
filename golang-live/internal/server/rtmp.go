@@ -131,7 +131,19 @@ func (s *Server) handleRTMPConnInner(conn net.Conn) error {
 	if err := muxer.Start(); err != nil {
 		return fmt.Errorf("start hls muxer: %w", err)
 	}
-	defer muxer.Close()
+
+	session := &liveSession{
+		publicID: publicID,
+		muxer:    muxer,
+		conn:     conn,
+	}
+
+	// Registered before the session-started callback so the muxer is always
+	// closed and the on-disk HLS tree is always reaped, even if that callback
+	// fails. defer LIFO order on return: end callback -> unregister -> close
+	// muxer -> remove directory.
+	defer s.cleanupHLSDir(hlsDir)
+	defer session.close()
 
 	var startResp SessionStartedResponse
 	if err := s.laravel.Post(context.Background(), "/internal/live/session-started", SessionStartedRequest{
@@ -142,11 +154,7 @@ func (s *Server) handleRTMPConnInner(conn net.Conn) error {
 		return fmt.Errorf("session start failed: %w", err)
 	}
 
-	session := &liveSession{
-		publicID:  publicID,
-		sessionID: startResp.SessionID,
-		muxer:     muxer,
-	}
+	session.sessionID = startResp.SessionID
 
 	if !s.putLiveSession(session) {
 		_ = s.laravel.Post(context.Background(), "/internal/live/session-failed", map[string]any{
@@ -169,6 +177,16 @@ func (s *Server) handleRTMPConnInner(conn net.Conn) error {
 		if err := reader.Read(); err != nil {
 			return err
 		}
+	}
+}
+
+func (s *Server) cleanupHLSDir(dir string) {
+	if dir == "" || filepath.Clean(dir) == filepath.Clean(s.cfg.HLSRoot) {
+		return
+	}
+
+	if err := os.RemoveAll(dir); err != nil {
+		s.log.Warn("hls dir cleanup failed", "err", err, "dir", dir)
 	}
 }
 
@@ -202,6 +220,10 @@ func publishCredentials(u *url.URL) (string, string, error) {
 
 	if publicID == "" || publicID == "." || streamKey == "" {
 		return "", "", fmt.Errorf("publish name must be {public_id}?key={stream_key}")
+	}
+
+	if !validPublicID(publicID) {
+		return "", "", fmt.Errorf("invalid public id %q", publicID)
 	}
 
 	return publicID, streamKey, nil

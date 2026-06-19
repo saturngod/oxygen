@@ -177,15 +177,24 @@ class OrganizationLiveStreamsController extends Controller
         Organization $organization,
         LiveStream $liveStream,
         LiveStreamEndpointService $endpoints,
+        LiveStreamControlClient $client,
     ): RedirectResponse {
         $this->authorize('manage', $organization);
         abort_unless($liveStream->organization_id === $organization->id, 404);
 
+        $wasLive = $liveStream->isLive();
+
         $liveStream->forceFill([
             'stream_key' => $endpoints->generateStreamKey(),
             'settings_version' => $liveStream->settings_version + 1,
-            'restart_required' => $liveStream->isLive() || $liveStream->restart_required,
+            'restart_required' => $wasLive || $liveStream->restart_required,
         ])->save();
+
+        // Kick the active publisher so the rotated (old) key stops working now,
+        // rather than remaining valid until the streamer voluntarily reconnects.
+        if ($wasLive) {
+            $client->restart($liveStream);
+        }
 
         return to_route('admin.organizations.live-streams.show', [$organization, $liveStream])
             ->with('toast', ['type' => 'success', 'message' => __('Stream key rotated.')]);
