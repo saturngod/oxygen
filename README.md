@@ -71,8 +71,9 @@ Oxygen is **not a single process**. A full local stack runs the Laravel web app 
 | 4 | Webhook consumer | `php artisan webhooks:consume` | Turns Go/Laravel webhook events into delivery jobs |
 | 5 | Go transcode worker | `go run ./cmd/worker` (in `golang-queue/`) | VOD transcoding (ffmpeg → HLS) |
 | 6 | Go live service | `go run ./cmd/live` (in `golang-live/`) | Live streaming (RTMP ingest + HLS) |
+| 7 | Laravel scheduler | `php artisan schedule:work` | Periodic tasks — daily prune of old viewer rollups (`rollups:prune`) |
 
-`composer run dev` bundles **1–3 + logs** into one command. **4, 5, and 6 are always separate.** Skip 6 if you are not using live streaming.
+`composer run dev` bundles **1–3 + logs** into one command. **4, 5, 6, and 7 are always separate.** Skip 6 if you are not using live streaming. Skip 7 in short dev sessions — it only matters for long-running/production environments.
 
 ### Prerequisites
 
@@ -182,7 +183,21 @@ go run ./cmd/live
 
 See [Live Streaming](#live-streaming) for the OBS setup and full endpoint list.
 
-### Step 6 — Verify
+### Step 6 — Start the Laravel scheduler (new terminal, optional in dev)
+
+```bash
+php artisan schedule:work
+```
+
+This runs scheduled tasks — currently the daily `rollups:prune`, which deletes per-minute live viewer rollups older than 30 days (session summaries are kept). In production, prefer a single cron entry instead:
+
+```cron
+* * * * * cd /path/to/oxygen && php artisan schedule:run >> /dev/null 2>&1
+```
+
+Run a one-off prune manually with `php artisan rollups:prune --days=30`.
+
+### Step 7 — Verify
 
 1. Open `http://127.0.0.1:8000` and register (creates an org and logs you in as admin).
 2. Upload a video under **Manage** — it goes straight to S3, then a job lands on Redis.
@@ -561,6 +576,7 @@ For a full step-by-step run guide (all processes, env, verification), see [Runni
 composer run setup          # first-time: install, migrate, build
 composer run dev            # php serve + queue:listen + pail + vite dev
 php artisan webhooks:consume # webhook delivery (separate terminal)
+php artisan schedule:work    # scheduled tasks, e.g. daily rollups:prune (separate terminal)
 
 # Go worker (from golang-queue/)
 cp .env.example .env        # configure DATABASE_URL, REDIS_ADDR, AWS creds
@@ -583,7 +599,7 @@ php artisan octane:start --max-requests=500   # serve via FrankenPHP
 php artisan octane:reload                      # reload workers after deploy
 ```
 
-The queue worker, webhook consumer, and both Go services still run as separate processes. See `CLAUDE.md` for Octane state-safety rules.
+The queue worker, webhook consumer, scheduler (cron `schedule:run`), and both Go services still run as separate processes. See `CLAUDE.md` for Octane state-safety rules.
 
 ### Verify changes
 
