@@ -106,6 +106,11 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 RUN mkdir -p storage/framework/{cache,sessions,views} storage/logs bootstrap/cache \
     && chmod -R 775 storage bootstrap/cache
 
+# Scratch space for the Go transcode worker: per-job source download + HLS
+# renditions (~15GB per 4GB job). Mount a sized volume here in Dokploy
+# (~15GB x WORKER_CONCURRENCY). Cleaned per job, but peak usage is large.
+VOLUME ["/tmp/transcoder"]
+
 # Ports: 8000 web/Octane, 8081 live HTTP/HLS, 1935 RTMP ingest.
 EXPOSE 8000 8081 1935
 
