@@ -269,8 +269,11 @@ func (s *Server) hls(w http.ResponseWriter, r *http.Request) {
 	viewerID := s.viewerID(w, r)
 	s.tracker.Observe(publicID, viewerID, clean, time.Now())
 
+	// The gohlslib muxer sets CDN-friendly per-file Cache-Control headers itself
+	// (no-cache for the low-latency playlist, public max-age for segments), so we
+	// pass the writer through untouched and let it manage caching.
 	if session := s.getLiveSession(publicID); session != nil {
-		if session.handle(&noStoreResponseWriter{ResponseWriter: w}, r) {
+		if session.handle(w, r) {
 			return
 		}
 	}
@@ -290,31 +293,23 @@ func (s *Server) hls(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Go's http.ServeFile sets no Cache-Control, so set one by file type for the
+	// disk fallback: playlists must always revalidate (live), segments are
+	// uniquely named per muxer run and may be cached indefinitely by a CDN.
+	setHLSCacheHeader(w, clean)
 	http.ServeFile(w, r, path)
 }
 
-type noStoreResponseWriter struct {
-	http.ResponseWriter
-	wroteHeader bool
-}
-
-func (w *noStoreResponseWriter) WriteHeader(status int) {
-	w.wroteHeader = true
-	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
-	w.Header().Set("Pragma", "no-cache")
-	w.Header().Set("Expires", "0")
-	w.ResponseWriter.WriteHeader(status)
-}
-
-func (w *noStoreResponseWriter) Write(data []byte) (int, error) {
-	if !w.wroteHeader {
-		w.wroteHeader = true
-		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
-		w.Header().Set("Pragma", "no-cache")
-		w.Header().Set("Expires", "0")
+// setHLSCacheHeader applies a CDN-friendly Cache-Control header based on the
+// requested file. The .m3u8 playlist changes every few seconds and must never
+// be cached stale; segments (.mp4 init/seg/part) have immutable, unique names.
+func setHLSCacheHeader(w http.ResponseWriter, name string) {
+	if strings.HasSuffix(name, ".m3u8") {
+		w.Header().Set("Cache-Control", "no-cache")
+		return
 	}
 
-	return w.ResponseWriter.Write(data)
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 }
 
 func (s *Server) getLiveSession(publicID string) *liveSession {
