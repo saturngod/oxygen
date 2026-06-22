@@ -85,7 +85,47 @@ Install these first:
 - **FFmpeg** (`ffmpeg` + `ffprobe` on `PATH`) — required by the transcode worker
 - **PostgreSQL** — shared by Laravel and both Go services
 - **Redis** — job + webhook queues
-- **S3** — an AWS bucket, or MinIO locally (separate source + streaming buckets recommended)
+- **S3** — an AWS bucket, or an S3-compatible server locally such as [RustFS](https://docs.rustfs.com/installation/docker/) or MinIO (separate source + streaming buckets recommended; see [Local S3 with RustFS](#local-s3-with-rustfs))
+
+### Local S3 with RustFS
+
+For local development you don't need a real AWS account. [RustFS](https://docs.rustfs.com/installation/docker/) is an S3-compatible server you can run in Docker. (MinIO works the same way if you prefer it.)
+
+Start RustFS:
+
+```bash
+docker run -d \
+  --name rustfs_local \
+  -p 9000:9000 \
+  -p 9001:9001 \
+  -v /mnt/rustfs/data:/data \
+  -e RUSTFS_ACCESS_KEY=rustfsadmin \
+  -e RUSTFS_SECRET_KEY=rustfsadmin \
+  -e RUSTFS_CONSOLE_ENABLE=true \
+  rustfs/rustfs:latest \
+  /data
+```
+
+- S3 API endpoint: `http://localhost:9000`
+- Web console: `http://localhost:9001`
+- Default credentials: access key `rustfsadmin`, secret key `rustfsadmin`
+
+> The data volume must be writable by user id `10001`: `sudo chown -R 10001:10001 /mnt/rustfs/data`.
+
+Open the console at `http://localhost:9001`, log in, and create two buckets: `oxygen-source` and `oxygen-streaming`.
+
+Then point the Laravel `.env` (and the Go services) at it. The key extra settings for an S3-compatible endpoint are the endpoint URL and **path-style** addressing:
+
+```dotenv
+AWS_ACCESS_KEY_ID=rustfsadmin
+AWS_SECRET_ACCESS_KEY=rustfsadmin
+AWS_DEFAULT_REGION=us-east-1
+AWS_BUCKET=oxygen-source
+AWS_ENDPOINT=http://localhost:9000
+AWS_USE_PATH_STYLE_ENDPOINT=true
+```
+
+The Go worker uses the same endpoint via its `SOURCE_AWS_*` / `STREAMING_AWS_*` values (set the matching endpoint/path-style options in `golang-queue/.env`).
 
 ### Step 1 — Configure and set up the Laravel app
 
@@ -124,6 +164,16 @@ LIVE_CONTROL_TOKEN=change-me-live-control-token
 ```
 
 Re-run migrations if you set up the DB after `setup`: `php artisan migrate`.
+
+#### Disabling public registration
+
+Public sign-up is controlled by `ALLOW_REGISTER` in `.env`. Set it to `false` to turn off the registration route and hide the register link in the UI:
+
+```dotenv
+ALLOW_REGISTER=false
+```
+
+It defaults to enabled. The flag is read in `config/fortify.php` (conditionally includes `Features::registration()`); the frontend hides the register link via the `canRegister` prop. After changing it, run `php artisan config:clear`.
 
 ### Step 2 — Start the core Laravel stack
 

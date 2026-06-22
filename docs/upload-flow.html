@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Upload Flow — Oxygen Docs</title>
+    <meta name="description" content="S3 direct multipart upload flow — the browser uploads straight to S3, Laravel only signs and records." />
+    <script>
+      (function () {
+        document.documentElement.classList.add("js");        var s = localStorage.getItem("oxygen-theme");
+        var d = s ? s === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+        if (d) document.documentElement.classList.add("dark");
+        window.addEventListener("DOMContentLoaded", function () { setTimeout(function () { document.documentElement.classList.add("docs-ready"); }, 1500); });
+      })();
+    </script>
+    <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
+    <script>
+      tailwind.config = { darkMode: "class", theme: { extend: { fontFamily: { sans: ["Inter", "sans-serif"] } } } };
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+    <link rel="stylesheet" href="assets/styles.css" />
+  </head>
+  <body class="bg-white text-slate-700 antialiased dark:bg-slate-950 dark:text-slate-300" data-page="upload-flow">
+    <article id="doc">
+      <h1>Upload Flow (S3 Direct Multipart)</h1>
+      <p>
+        The browser uploads directly to S3. The Laravel app never proxies file bytes — it only issues presigned URLs and
+        records metadata.
+      </p>
+
+      <h2 id="sequence">Sequence</h2>
+      <pre class="mermaid">
+sequenceDiagram
+    participant B as Browser
+    participant L as Laravel
+    participant C as Redis Cache
+    participant S3 as S3 (Source)
+
+    B->>L: POST /multipart/init {file_name, folder_id, profile_id}
+    L->>L: Validate folder ownership + profile org scope
+    L->>L: Generate S3 key: media/{org_id}/{uuid}.{ext}
+    L->>S3: CreateMultipartUpload
+    S3-->>L: UploadId
+    L->>C: Cache upload context (24h TTL)
+    L-->>B: {upload_id, key}
+
+    loop For each 5MB chunk
+        B->>L: POST /multipart/sign-part {upload_id, part_number}
+        L->>C: Re-read & authorize session
+        L->>S3: Presign UploadPart URL (20min)
+        S3-->>L: Presigned URL
+        L-->>B: {url}
+        B->>S3: PUT chunk directly (presigned URL)
+        S3-->>B: ETag header
+    end
+
+    B->>L: POST /multipart/complete {upload_id, title, parts[], tags}
+    L->>C: Re-read & authorize session
+    L->>S3: CompleteMultipartUpload
+    L->>S3: headObject (get file size)
+    L->>L: DB txn: create MediaFile + MediaFileProfile
+    L->>L: dispatchTranscodeJob() to Redis (LPUSH)
+    L->>C: Evict cache entry
+    L-->>B: {ok: true}
+      </pre>
+
+      <h2 id="security">Security</h2>
+      <p>
+        The server never trusts <code>uploadId</code>, <code>key</code>, or <code>folder_id</code> from the client.
+        Every endpoint re-reads the upload context from cache and re-checks <code>organization_id</code> against the
+        session.
+      </p>
+    </article>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script type="module" src="assets/app.js"></script>
+  </body>
+</html>

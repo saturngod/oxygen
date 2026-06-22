@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Live Streaming — Oxygen Docs</title>
+    <meta name="description" content="Live streaming with Laravel as control plane and the standalone golang-live service for RTMP ingest and HLS." />
+    <script>
+      (function () {
+        document.documentElement.classList.add("js");        var s = localStorage.getItem("oxygen-theme");
+        var d = s ? s === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+        if (d) document.documentElement.classList.add("dark");
+        window.addEventListener("DOMContentLoaded", function () { setTimeout(function () { document.documentElement.classList.add("docs-ready"); }, 1500); });
+      })();
+    </script>
+    <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
+    <script>
+      tailwind.config = { darkMode: "class", theme: { extend: { fontFamily: { sans: ["Inter", "sans-serif"] } } } };
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+    <link rel="stylesheet" href="assets/styles.css" />
+  </head>
+  <body class="bg-white text-slate-700 antialiased dark:bg-slate-950 dark:text-slate-300" data-page="live-streaming">
+    <article id="doc">
+      <h1>Live Streaming</h1>
+      <p>
+        Live streams are managed from the Laravel admin UI and served by the standalone Go service in
+        <code>golang-live/</code>.
+      </p>
+
+      <h2 id="ownership">Responsibilities</h2>
+      <p><strong>Laravel owns:</strong></p>
+      <ul>
+        <li>stream records, encrypted stream keys, statuses, restart flags, and viewer rollups</li>
+        <li>admin-only stream management under <code>admin/organizations/{organization}/live-streams</code></li>
+        <li>internal callback endpoints under <code>internal/live/*</code></li>
+        <li>control requests to the Go live service, such as stream restart</li>
+      </ul>
+      <p><strong>The Go live service owns:</strong></p>
+      <ul>
+        <li>RTMP ingest on <code>LIVE_RTMP_ADDR</code></li>
+        <li>publish auth proxying to Laravel</li>
+        <li>session start/end/fail callbacks to Laravel</li>
+        <li>HLS file serving from a local HLS root</li>
+        <li>viewer cookies, active viewer tracking, and minute rollup snapshots</li>
+      </ul>
+      <p>
+        Live output is written as fMP4 HLS, not <code>.ts</code> files. Under <code>LIVE_HLS_ROOT</code>, each stream
+        gets its own directory containing playlists like <code>index.m3u8</code> and media files like
+        <code>*_init.mp4</code>, <code>*_segNN.mp4</code>, and <code>*_partNNN.mp4</code>.
+      </p>
+
+      <h2 id="laravel-config">Laravel Live Configuration</h2>
+      <p>Set these values in the Laravel <code>.env</code> file:</p>
+      <pre><code class="language-ini">LIVE_RTMP_URL=rtmp://127.0.0.1:1935/live
+LIVE_RTMP_ADDR=:1935
+LIVE_HLS_URL=http://127.0.0.1:8081/live
+LIVE_SERVICE_TOKEN=change-me-live-service-token
+LIVE_CONTROL_URL=http://127.0.0.1:8081
+LIVE_CONTROL_TOKEN=change-me-live-control-token</code></pre>
+      <p>
+        <code>LIVE_SERVICE_TOKEN</code> must match the Go service value so Go can call Laravel
+        <code>internal/live/*</code> endpoints with <code>X-Live-Service-Token</code>.
+      </p>
+      <p>
+        <code>LIVE_CONTROL_TOKEN</code> must match the Go service value so Laravel can call Go control endpoints with
+        <code>Authorization: Bearer ...</code>.
+      </p>
+      <p>After changing env or routes, run:</p>
+      <pre><code class="language-bash">php artisan optimize:clear
+php artisan migrate
+php artisan wayfinder:generate</code></pre>
+
+      <h2 id="setup">Live Stream Setup</h2>
+      <ol>
+        <li>Put the Laravel live settings above into <code>.env</code>.</li>
+        <li>Configure the Go live service with the same <code>LIVE_SERVICE_TOKEN</code> and <code>LIVE_CONTROL_TOKEN</code>.</li>
+        <li>Start Laravel and the Go live service:</li>
+      </ol>
+      <pre><code class="language-bash">composer run dev
+cd golang-live
+go run ./cmd/live</code></pre>
+      <ol start="4">
+        <li>In the admin UI, open an organization and create a live stream.</li>
+        <li>
+          Copy the stream values from the live stream page:
+          <ul>
+            <li><code>Server</code>: <code>rtmp://127.0.0.1:1935/live</code></li>
+            <li><code>Stream key</code>: <code>{public_id}?key={stream_key}</code></li>
+            <li><code>M3U8 URL</code>: use the playback URL shown on the page</li>
+          </ul>
+        </li>
+        <li>In OBS, set <code>Keyframe Interval</code> to <code>2</code> seconds.</li>
+        <li>Start streaming from OBS, then open the live stream page to watch the HLS playback.</li>
+      </ol>
+
+      <h2 id="run-go-live">Run The Go Live Service</h2>
+      <p>From <code>golang-live/</code>:</p>
+      <pre><code class="language-bash">LIVE_ADDR=:8081 \
+LIVE_RTMP_ADDR=:1935 \
+LIVE_HLS_ROOT=/tmp/oxygen-live/hls \
+LARAVEL_URL=http://127.0.0.1:8000 \
+LIVE_SERVICE_TOKEN=change-me-live-service-token \
+LIVE_CONTROL_TOKEN=change-me-live-control-token \
+go run ./cmd/live</code></pre>
+      <p>Build it with:</p>
+      <pre><code class="language-bash">go build -o bin/live ./cmd/live</code></pre>
+      <p>The service exposes:</p>
+      <table>
+        <thead>
+          <tr><th>Endpoint</th><th>Purpose</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>GET /healthz</code></td><td>Health check</td></tr>
+          <tr><td><code>RTMP :1935</code></td><td>OBS/RTMP publish ingest</td></tr>
+          <tr><td><code>POST /ingest/auth</code></td><td>Authenticates a publisher by proxying to Laravel</td></tr>
+          <tr><td><code>POST /sessions/start</code></td><td>Starts a Laravel live session</td></tr>
+          <tr><td><code>POST /sessions/end</code></td><td>Ends a Laravel live session</td></tr>
+          <tr><td><code>POST /sessions/fail</code></td><td>Marks a Laravel live session failed</td></tr>
+          <tr><td><code>POST /streams/{publicID}/restart</code></td><td>Control endpoint used by Laravel</td></tr>
+          <tr><td><code>GET /live/{publicID}/...</code></td><td>Serves HLS playlists and fMP4 media parts</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="local-flow">Local Live Stream Flow</h2>
+      <ol>
+        <li>Start Laravel with <code>composer run dev</code>.</li>
+        <li>Start <code>golang-live</code> with matching <code>LIVE_SERVICE_TOKEN</code> and <code>LIVE_CONTROL_TOKEN</code>.</li>
+        <li>In the admin UI, open an organization and create a live stream.</li>
+        <li>Use the stream's <code>public_id</code> as the stream path and its generated stream key as the secret credential.</li>
+        <li>Publish from OBS to the copied server and stream key.</li>
+        <li>Open the stream show page to watch HLS playback and viewer metrics.</li>
+      </ol>
+      <p>For RTMP clients that accept a single stream key field, the publish name is:</p>
+      <pre><code class="language-text">{public_id}?key={stream_key}</code></pre>
+      <p>For example, with <code>LIVE_RTMP_URL=rtmp://127.0.0.1:1935/live</code>, OBS-style settings are:</p>
+      <pre><code class="language-text">Server:     rtmp://127.0.0.1:1935/live
+Stream key: 01ks8n3cs82yj3ksf4p57z4ykg?key=6rIHIKXFoBsEx1y0mt2zNDFsNDafNbcW6HgKCjnmKMEcKu4A</code></pre>
+      <p>
+        The raw secret key is only the value after <code>?key=</code>. The value before <code>?key=</code> is the stream
+        path / public id.
+      </p>
+      <p>
+        The Go live service accepts the OBS RTMP publish, validates the publish name against Laravel, starts the live
+        session, remuxes the RTMP media into HLS, and sends the session end callback when OBS disconnects.
+      </p>
+    </article>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script type="module" src="assets/app.js"></script>
+  </body>
+</html>

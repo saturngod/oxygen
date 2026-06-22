@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Overview — Oxygen Docs</title>
+    <meta name="description" content="Oxygen — a multi-tenant video transcoding & live streaming platform built with Laravel, React, and Go." />
+    <script>
+      (function () {
+        document.documentElement.classList.add("js");        var s = localStorage.getItem("oxygen-theme");
+        var d = s ? s === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+        if (d) document.documentElement.classList.add("dark");
+        window.addEventListener("DOMContentLoaded", function () { setTimeout(function () { document.documentElement.classList.add("docs-ready"); }, 1500); });
+      })();
+    </script>
+    <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
+    <script>
+      tailwind.config = { darkMode: "class", theme: { extend: { fontFamily: { sans: ["Inter", "sans-serif"] } } } };
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+    <link rel="stylesheet" href="assets/styles.css" />
+  </head>
+  <body class="bg-white text-slate-700 antialiased dark:bg-slate-950 dark:text-slate-300" data-page="index">
+    <article id="doc">
+      <div class="not-prose mb-10">
+        <span class="inline-flex items-center gap-2 rounded-full bg-[var(--brand-soft)] px-3 py-1 text-xs font-semibold text-[var(--brand-accent-text)]">
+          Laravel 13 · React 19 · Go 1.25
+        </span>
+        <h1 class="mt-4 text-4xl font-extrabold tracking-tight text-slate-900 dark:text-white sm:text-5xl">
+          Oxygen Platform Docs
+        </h1>
+        <p class="mt-4 max-w-2xl text-lg text-slate-600 dark:text-slate-400">
+          A multi-tenant <strong>video transcoding</strong> and <strong>live streaming</strong> platform. Laravel is the
+          control plane; two standalone Go services do the heavy media work.
+        </p>
+        <div class="mt-6 flex flex-wrap gap-3">
+          <a href="getting-started.html" class="rounded-lg bg-[var(--brand)] px-5 py-2.5 text-sm font-semibold text-[var(--brand-foreground)] shadow-lg shadow-amber-500/30 transition hover:brightness-95">Get Started →</a>
+          <a href="architecture.html" class="rounded-lg border border-slate-300 px-5 py-2.5 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800">Tech Stack</a>
+        </div>
+      </div>
+
+      <div class="not-prose mb-12 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div class="rounded-xl border border-slate-200 p-5 dark:border-slate-800">
+          <h3 class="font-semibold text-slate-900 dark:text-white">VOD Transcoding</h3>
+          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Go worker consumes Redis jobs, runs FFmpeg, writes HLS to S3.</p>
+        </div>
+        <div class="rounded-xl border border-slate-200 p-5 dark:border-slate-800">
+          <h3 class="font-semibold text-slate-900 dark:text-white">Live Streaming</h3>
+          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">RTMP ingest, remux to live HLS (fMP4), viewer tracking.</p>
+        </div>
+        <div class="rounded-xl border border-slate-200 p-5 dark:border-slate-800">
+          <h3 class="font-semibold text-slate-900 dark:text-white">Direct S3 Upload</h3>
+          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Browser uploads straight to S3 via presigned multipart.</p>
+        </div>
+        <div class="rounded-xl border border-slate-200 p-5 dark:border-slate-800">
+          <h3 class="font-semibold text-slate-900 dark:text-white">Webhooks</h3>
+          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Event delivery with retries and per-org isolation.</p>
+        </div>
+        <div class="rounded-xl border border-slate-200 p-5 dark:border-slate-800">
+          <h3 class="font-semibold text-slate-900 dark:text-white">Multi-Tenancy</h3>
+          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Organization isolation enforced at every layer.</p>
+        </div>
+        <div class="rounded-xl border border-slate-200 p-5 dark:border-slate-800">
+          <h3 class="font-semibold text-slate-900 dark:text-white">Quality Profiles</h3>
+          <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">Per-org named quality sets, snapshotted at upload.</p>
+        </div>
+      </div>
+
+      <p>
+        Oxygen is a multi-tenant video transcoding service built with <strong>Laravel 13 + Inertia v3 + React 19</strong>
+        on the web layer, a standalone <strong>Go worker</strong> for FFmpeg-based transcoding, and a separate
+        <strong>Go live service</strong> for live-stream runtime concerns. VOD transcoding coordinates through shared
+        <strong>Postgres</strong>, <strong>Redis</strong>, and <strong>S3</strong>. Live streaming uses Laravel as the
+        control plane and the Go live service for publish auth proxying, session callbacks, HLS serving, and viewer
+        rollups.
+      </p>
+
+      <h2 id="architecture-overview">Architecture Overview</h2>
+      <p>Oxygen has two runtime paths: VOD transcoding and live streaming. Laravel is the control plane for both.</p>
+
+      <h3>VOD path</h3>
+      <pre><code>┌──────────────┐      ┌──────────────┐      ┌──────────────┐
+│   Browser    │      │   Laravel    │      │  Go Worker   │
+│  (React/     │─────▶│  (Upload &   │─────▶│  (FFmpeg     │
+│   Inertia)   │      │   Manage)    │      │   Transcode) │
+└──────┬───────┘      └──────┬───────┘      └──────┬───────┘
+       │                     │                     │
+       │  S3 Direct Upload   │    Redis (Jobs)     │
+       └─────────────────────┤◄────────────────────┤
+                             │                     │
+                     ┌───────▼───────┐     ┌───────▼───────┐
+                     │    Amazon     │     │    Postgres   │
+                     │      S3       │     │  (media_files │
+                     │ (Source +     │     │   profiles)  │
+                     │  Streaming)   │     └───────────────┘
+                     └───────────────┘</code></pre>
+
+      <h3>Live path</h3>
+      <pre><code>┌──────────────┐      ┌──────────────┐      ┌──────────────┐
+│     OBS      │─────▶│  golang-live │─────▶│ Browser      │
+│  Publisher   │      │ (RTMP + HLS) │      │ Player       │
+└──────┬───────┘      └──────┬───────┘      └──────┬───────┘
+       │                     │                     │
+       │  RTMP Publish       │    HLS Playback     │
+       └─────────────────────┤◄────────────────────┘
+                             │
+                     ┌───────▼───────┐
+                     │    Laravel    │
+                     │ (Auth + live  │
+                     │  callbacks +  │
+                     │  viewer rollup)│
+                     └───────────────┘</code></pre>
+
+      <pre class="mermaid">
+graph LR
+    OBS[OBS Publisher] --> RTMP[golang-live&lt;br/&gt;RTMP ingest]
+    RTMP --> AUTH[Laravel&lt;br/&gt;publish auth + session callbacks]
+    RTMP --> HLS[golang-live&lt;br/&gt;HLS playlists + fMP4 parts]
+    HLS --> PLAYER[Browser player]
+    PLAYER --> ADMIN[Laravel&lt;br/&gt;admin UI + viewer rollups]
+    ADMIN --> CONTROL[golang-live&lt;br/&gt;restart/control]
+      </pre>
+
+      <p>
+        Live streaming uses Laravel for stream records, encrypted keys, admin UI, and viewer metrics. The standalone Go
+        live service handles RTMP ingest, validates publishers against Laravel, remuxes the stream into HLS, serves
+        playback, and reports session and viewer state back to Laravel.
+      </p>
+    </article>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script type="module" src="assets/app.js"></script>
+  </body>
+</html>

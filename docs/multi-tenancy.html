@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Multi-Tenancy — Oxygen Docs</title>
+    <meta name="description" content="Organization isolation enforced at the session, middleware, controller, Go worker, S3, and webhook layers." />
+    <script>
+      (function () {
+        document.documentElement.classList.add("js");        var s = localStorage.getItem("oxygen-theme");
+        var d = s ? s === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+        if (d) document.documentElement.classList.add("dark");
+        window.addEventListener("DOMContentLoaded", function () { setTimeout(function () { document.documentElement.classList.add("docs-ready"); }, 1500); });
+      })();
+    </script>
+    <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
+    <script>
+      tailwind.config = { darkMode: "class", theme: { extend: { fontFamily: { sans: ["Inter", "sans-serif"] } } } };
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+    <link rel="stylesheet" href="assets/styles.css" />
+  </head>
+  <body class="bg-white text-slate-700 antialiased dark:bg-slate-950 dark:text-slate-300" data-page="multi-tenancy">
+    <article id="doc">
+      <h1>Multi-Tenancy (Organization Isolation)</h1>
+
+      <h2 id="layers">Isolation layers</h2>
+      <pre class="mermaid">
+graph LR
+    subgraph "Session Layer"
+        SESS[current_organization_id in session]
+    end
+
+    subgraph "Route Middleware"
+        A1[auth + verified]
+        A2[EnsureOrganizationMember]
+        A3[EnsureOrganizationAdmin]
+        A1 --> A2 --> A3
+    end
+
+    subgraph "Data Layer"
+        CTRL[Controller: scope every query by organization_id]
+        GO_WORKER[Go: LoadMediaFile by id and organization_id]
+        S3_NS[S3 keys namespaced by org id]
+    end
+
+    SESS --> A2
+    A2 --> CTRL
+    A3 --> CTRL
+    CTRL --> GO_WORKER
+    CTRL --> S3_NS
+      </pre>
+
+      <h2 id="enforcement">Every layer enforces org isolation</h2>
+      <ul>
+        <li><strong>Session</strong> — <code>current_organization_id</code> resolved from user's memberships</li>
+        <li><strong>Middleware</strong> — three concentric groups (auth → member → admin)</li>
+        <li><strong>Controllers</strong> — every query scoped by <code>organization_id</code> from session</li>
+        <li><strong>Go worker</strong> — re-verifies <code>organization_id</code> from DB, drops mismatched jobs</li>
+        <li><strong>S3</strong> — keys namespaced by org ID</li>
+        <li><strong>Webhooks</strong> — only delivered to webhooks belonging to the event's org</li>
+      </ul>
+    </article>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script type="module" src="assets/app.js"></script>
+  </body>
+</html>

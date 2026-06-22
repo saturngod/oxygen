@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Transcoding Pipeline — Oxygen Docs</title>
+    <meta name="description" content="The standalone Go worker: BRPOP a job, run a single FFmpeg invocation, upload the HLS tree to S3." />
+    <script>
+      (function () {
+        document.documentElement.classList.add("js");        var s = localStorage.getItem("oxygen-theme");
+        var d = s ? s === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+        if (d) document.documentElement.classList.add("dark");
+        window.addEventListener("DOMContentLoaded", function () { setTimeout(function () { document.documentElement.classList.add("docs-ready"); }, 1500); });
+      })();
+    </script>
+    <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
+    <script>
+      tailwind.config = { darkMode: "class", theme: { extend: { fontFamily: { sans: ["Inter", "sans-serif"] } } } };
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+    <link rel="stylesheet" href="assets/styles.css" />
+  </head>
+  <body class="bg-white text-slate-700 antialiased dark:bg-slate-950 dark:text-slate-300" data-page="transcoding">
+    <article id="doc">
+      <h1>Transcoding Pipeline</h1>
+      <p>
+        The Go worker is a standalone binary. It shares Postgres, Redis, and S3 with Laravel but makes no HTTP calls to
+        it.
+      </p>
+
+      <h2 id="flow">Job flow</h2>
+      <pre class="mermaid">
+flowchart TD
+    BRPOP[BRPOP from Redis queue&lt;br/&gt;30s timeout] --> DECODE[Decode JSON payload]
+    DECODE --> |Missing id or org_id| DROP[Log error, drop job]
+    DECODE --> LOAD_MF[Load media_files row from Postgres&lt;br/&gt;WHERE id and organization_id]
+
+    LOAD_MF --> |Not found / org mismatch| DROP
+    LOAD_MF --> LOAD_PROF[Load media_file_profiles row&lt;br/&gt;for quality snapshot]
+
+    LOAD_PROF --> |No profile| FAIL[markFailed status=failed]
+    LOAD_PROF --> SET_PROGRESS[Set status=progress, progress=0]
+
+    SET_PROGRESS --> MKDIR[Create temp dir under WORK_DIR]
+    MKDIR --> DL{Has file_path?}
+
+    DL --> |Yes| DOWNLOAD[Download source from S3]
+    DL --> |No| URL{Has source_url?}
+    URL --> |Yes| USE_URL[Use remote URL directly]
+    URL --> |No| FAIL
+
+    DOWNLOAD --> TRANSCODE
+    USE_URL --> TRANSCODE[Run ffmpeg&lt;br/&gt;single invocation, all renditions]
+
+    TRANSCODE --> |Error| FAIL
+    TRANSCODE --> UPLOAD[Upload HLS tree to streaming S3]
+
+    UPLOAD --> |Error| FAIL
+    UPLOAD --> SUCCESS[Set status=success&lt;br/&gt;progress=100&lt;br/&gt;streaming_url=url]
+
+    FAIL --> CLEANUP[cleanup temp dir]
+    SUCCESS --> CLEANUP
+
+    style FAIL fill:#f66,color:#fff
+    style SUCCESS fill:#4c4,color:#fff
+      </pre>
+
+      <h2 id="single-ffmpeg">Single FFmpeg Invocation</h2>
+      <p>
+        All renditions are produced in <strong>one ffmpeg call</strong> using <code>filter_complex</code> with
+        <code>split=N</code> to avoid re-decoding the source:
+      </p>
+      <pre><code class="language-bash">ffmpeg -i source.mp4 \
+  -filter_complex "[0:v]split=2[v0][v1];[v0]scale=1280:720[vout0];[v1]scale=1920:1080[vout1]" \
+  -map "[vout0]" -c:v:0 libx264 -b:v:0 2800k \
+  -map "[vout1]" -c:v:1 libx264 -b:v:1 5000k \
+  -map a:0 -c:a:0 aac -b:a:0 128k \
+  -map a:0 -c:a:1 aac -b:a:1 128k \
+  -f hls -hls_time 6 -hls_playlist_type vod \
+  -var_stream_map "v:0,a:0 v:1,a:1" \
+  -master_pl_name main.m3u8
+  output/hls/v%v/segment_%d.ts</code></pre>
+      <p>
+        Progress is parsed from <code>out_time_us=</code> on stdout, capped at 99 during encoding, and written to
+        Postgres with a 2-second throttle.
+      </p>
+    </article>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script type="module" src="assets/app.js"></script>
+  </body>
+</html>

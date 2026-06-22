@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Quality & Profiles — Oxygen Docs</title>
+    <meta name="description" content="Per-organization quality profiles, snapshotted at upload, plus the shared quality catalog." />
+    <script>
+      (function () {
+        document.documentElement.classList.add("js");        var s = localStorage.getItem("oxygen-theme");
+        var d = s ? s === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+        if (d) document.documentElement.classList.add("dark");
+        window.addEventListener("DOMContentLoaded", function () { setTimeout(function () { document.documentElement.classList.add("docs-ready"); }, 1500); });
+      })();
+    </script>
+    <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
+    <script>
+      tailwind.config = { darkMode: "class", theme: { extend: { fontFamily: { sans: ["Inter", "sans-serif"] } } } };
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+    <link rel="stylesheet" href="assets/styles.css" />
+  </head>
+  <body class="bg-white text-slate-700 antialiased dark:bg-slate-950 dark:text-slate-300" data-page="quality-profiles">
+    <article id="doc">
+      <h1>Quality &amp; Profile System</h1>
+      <p>
+        Each organization defines <strong>profiles</strong> — named sets of quality levels. When a file is uploaded, the
+        profile's qualities are <strong>snapshotted</strong> into <code>media_file_profiles</code>, so editing a profile
+        later doesn't affect in-flight or completed jobs.
+      </p>
+
+      <h2 id="data-model">Data model</h2>
+      <pre class="mermaid">
+erDiagram
+    ORGANIZATION ||--o{ PROFILE : "has many"
+    ORGANIZATION ||--o{ MEDIA_FILE : "has many"
+    PROFILE ||--o{ MEDIA_FILE_PROFILE : "snapshot at upload"
+    MEDIA_FILE ||--|| MEDIA_FILE_PROFILE : "has one"
+
+    PROFILE {
+        uuid id PK
+        uuid organization_id FK
+        string name
+        json qualities
+        boolean is_default
+    }
+
+    MEDIA_FILE_PROFILE {
+        uuid id PK
+        uuid media_file_id FK
+        uuid profile_id FK
+        string name
+        json qualities
+    }
+
+    MEDIA_FILE {
+        uuid id PK
+        uuid organization_id FK
+        uuid folder_id FK
+        string title
+        string file_path
+        string source_url
+        string streaming_url
+        string status
+        int progress
+        jsonb tags
+    }
+      </pre>
+
+      <h2 id="quality-catalog">Quality Catalog (Laravel + Go must match)</h2>
+      <table>
+        <thead>
+          <tr><th>Quality</th><th>Resolution</th><th>Video Bitrate</th><th>Audio Bitrate</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>240p</td><td>352×240</td><td>600 kbps</td><td>64 kbps</td></tr>
+          <tr><td>360p</td><td>640×360</td><td>800 kbps</td><td>96 kbps</td></tr>
+          <tr><td>480p</td><td>842×480</td><td>1,400 kbps</td><td>128 kbps</td></tr>
+          <tr><td>720p</td><td>1,280×720</td><td>2,800 kbps</td><td>128 kbps</td></tr>
+          <tr><td>1080p</td><td>1,920×1,080</td><td>5,000 kbps</td><td>128 kbps</td></tr>
+          <tr><td>1440p</td><td>2,560×1,440</td><td>8,000 kbps</td><td>192 kbps</td></tr>
+          <tr><td>2160p</td><td>3,840×2,160</td><td>25,000 kbps</td><td>192 kbps</td></tr>
+        </tbody>
+      </table>
+      <p>
+        Defined in <code>App\Enums\VideoQuality</code> (PHP) and <code>internal/quality/quality.go</code> (Go). Changing
+        one requires updating the other in the same PR.
+      </p>
+    </article>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script type="module" src="assets/app.js"></script>
+  </body>
+</html>

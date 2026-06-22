@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tech Stack & Structure — Oxygen Docs</title>
+    <meta name="description" content="Tech stack, development quick reference, Octane production server, and project structure." />
+    <script>
+      (function () {
+        document.documentElement.classList.add("js");        var s = localStorage.getItem("oxygen-theme");
+        var d = s ? s === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+        if (d) document.documentElement.classList.add("dark");
+        window.addEventListener("DOMContentLoaded", function () { setTimeout(function () { document.documentElement.classList.add("docs-ready"); }, 1500); });
+      })();
+    </script>
+    <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
+    <script>
+      tailwind.config = { darkMode: "class", theme: { extend: { fontFamily: { sans: ["Inter", "sans-serif"] } } } };
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+    <link rel="stylesheet" href="assets/styles.css" />
+  </head>
+  <body class="bg-white text-slate-700 antialiased dark:bg-slate-950 dark:text-slate-300" data-page="architecture">
+    <article id="doc">
+      <h1>Tech Stack &amp; Structure</h1>
+
+      <h2 id="tech-stack">Tech Stack</h2>
+      <table>
+        <thead>
+          <tr><th>Component</th><th>Technology</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Web framework</td><td>Laravel 13 (PHP 8.4)</td></tr>
+          <tr><td>Frontend</td><td>React 19 + Inertia v3 + Tailwind v4</td></tr>
+          <tr><td>UI components</td><td>shadcn/ui (Radix) + Lucide icons</td></tr>
+          <tr><td>Transcode worker</td><td>Go 1.25 (standalone binary)</td></tr>
+          <tr><td>Live service</td><td>Go 1.25 (standalone HTTP service)</td></tr>
+          <tr><td>Transcoding</td><td>FFmpeg (subprocess) — VideoToolbox / NVENC / libx264</td></tr>
+          <tr><td>Database</td><td>Postgres (shared between Laravel &amp; Go)</td></tr>
+          <tr><td>Queue</td><td>Redis (raw LPUSH/BRPOP, not Laravel Queues)</td></tr>
+          <tr><td>Storage</td><td>Amazon S3 (separate source + streaming buckets)</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="development">Development</h2>
+      <p>
+        For a full step-by-step run guide (all processes, env, verification), see
+        <a href="getting-started.html">Getting Started</a>. Quick reference:
+      </p>
+      <pre><code class="language-bash"># Laravel app
+composer run setup          # first-time: install, migrate, build
+composer run dev            # php serve + queue:listen + pail + vite dev
+php artisan webhooks:consume # webhook delivery (separate terminal)
+php artisan schedule:work    # scheduled tasks, e.g. daily rollups:prune (separate terminal)
+
+# Go worker (from golang-queue/)
+cp .env.example .env        # configure DATABASE_URL, REDIS_ADDR, AWS creds
+go run ./cmd/worker         # run locally
+go build -o bin/worker ./cmd/worker
+
+# Go live service (from golang-live/)
+LIVE_SERVICE_TOKEN=change-me-live-service-token \
+LIVE_CONTROL_TOKEN=change-me-live-control-token \
+go run ./cmd/live
+go build -o bin/live ./cmd/live</code></pre>
+
+      <h3 id="production-octane">Production web server (Laravel Octane / FrankenPHP)</h3>
+      <p>The app ships with Octane (<code>OCTANE_SERVER=frankenphp</code>). Instead of <code>php artisan serve</code>:</p>
+      <pre><code class="language-bash">php artisan octane:start --max-requests=500   # serve via FrankenPHP
+php artisan octane:reload                      # reload workers after deploy</code></pre>
+      <p>
+        The queue worker, webhook consumer, scheduler (cron <code>schedule:run</code>), and both Go services still run
+        as separate processes. See <code>CLAUDE.md</code> for Octane state-safety rules.
+      </p>
+
+      <h3 id="verify-changes">Verify changes</h3>
+      <pre><code class="language-bash">composer ci:check           # lint + format + types + tests (Laravel)
+cd golang-queue && go test ./...
+cd golang-live && go test ./...</code></pre>
+
+      <h2 id="project-structure">Project Structure</h2>
+      <pre><code>oxygen/
+├── app/                          # Laravel application
+│   ├── Enums/VideoQuality.php    # Quality catalog (single source of truth)
+│   ├── Http/Controllers/         # Upload, manage, admin controllers
+│   ├── Jobs/SendWebhookJob.php   # Webhook delivery (3 retries)
+│   └── Models/                   # Eloquent models
+├── config/services.php           # Queue key config (env-overridable)
+├── golang-queue/                 # Standalone Go transcode worker
+│   ├── cmd/worker/main.go        # Entrypoint, goroutine pool
+│   ├── internal/
+│   │   ├── config/               # Env loading
+│   │   ├── queue/                # Redis consumer, job orchestration
+│   │   ├── db/                   # pgx queries (media_files only)
+│   │   ├── s3/                   # Source download + streaming upload
+│   │   ├── transcode/            # FFmpeg command builder + progress
+│   │   └── quality/              # Mirror of VideoQuality enum
+│   └── .env.example
+├── golang-live/                  # Standalone Go live-stream service
+│   ├── cmd/live/main.go          # HTTP server entrypoint
+│   └── internal/
+│       ├── config/               # Env loading
+│       └── server/               # Control, callbacks, HLS, viewer tracking
+├── resources/js/                 # React frontend (Inertia pages)
+│   ├── pages/manage.tsx          # Upload UI + S3 multipart logic
+│   └── pages/admin/              # Profile, user, settings, live stream management
+└── routes/web.php                # Three-tier middleware groups</code></pre>
+    </article>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script type="module" src="assets/app.js"></script>
+  </body>
+</html>

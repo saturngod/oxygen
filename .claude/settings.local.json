@@ -15,7 +15,13 @@
       "Bash(go build *)",
       "Bash(npx eslint *)",
       "Bash(npx prettier *)",
-      "Bash(go vet *)"
+      "Bash(go vet *)",
+      "Skill(code-review)",
+      "Bash(xargs cat)",
+      "WebFetch(domain:docs.rustfs.com)",
+      "Bash(perl -pi -e 's/\\(\\\\s*\\)\\(var s = localStorage\\\\.getItem\\\\\\(\"oxygen-theme\"\\\\\\);\\)/$1document.documentElement.classList.add\\(\"js\"\\);$1$2/' docs/*.html)",
+      "Bash(perl -pi -e 's/\\(if \\\\\\(d\\\\\\) document\\\\.documentElement\\\\.classList\\\\.add\\\\\\(\"dark\"\\\\\\);\\)/$1\\\\n        window.addEventListener\\(\"DOMContentLoaded\", function \\(\\) { setTimeout\\(function \\(\\) { document.documentElement.classList.add\\(\"docs-ready\"\\); }, 1500\\); }\\);/' docs/*.html)",
+      "Bash(cp public/logo.png docs/assets/logo.png)"
     ]
   },
   "enableAllProjectMcpServers": true,

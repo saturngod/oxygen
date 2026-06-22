@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Getting Started — Oxygen Docs</title>
+    <meta name="description" content="Run the full Oxygen stack locally: Laravel app, workers, and two Go services." />
+    <script>
+      (function () {
+        document.documentElement.classList.add("js");        var s = localStorage.getItem("oxygen-theme");
+        var d = s ? s === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+        if (d) document.documentElement.classList.add("dark");
+        window.addEventListener("DOMContentLoaded", function () { setTimeout(function () { document.documentElement.classList.add("docs-ready"); }, 1500); });
+      })();
+    </script>
+    <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
+    <script>
+      tailwind.config = { darkMode: "class", theme: { extend: { fontFamily: { sans: ["Inter", "sans-serif"] } } } };
+    </script>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+    <link rel="stylesheet" href="assets/styles.css" />
+  </head>
+  <body class="bg-white text-slate-700 antialiased dark:bg-slate-950 dark:text-slate-300" data-page="getting-started">
+    <article id="doc">
+      <h1>Running Locally — Step by Step</h1>
+      <p>
+        Oxygen is <strong>not a single process</strong>. A full local stack runs the Laravel web app plus several
+        long-running workers and two standalone Go services. This page walks through every piece.
+      </p>
+
+      <h2 id="what-runs">What runs, and why</h2>
+      <table>
+        <thead>
+          <tr><th>#</th><th>Process</th><th>Command</th><th>Needed for</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>1</td><td>Laravel web (HTTP)</td><td><code>php artisan serve</code> (or Octane)</td><td>The app UI + API</td></tr>
+          <tr><td>2</td><td>Vite dev server</td><td><code>npm run dev</code></td><td>Frontend hot reload (dev only)</td></tr>
+          <tr><td>3</td><td>Laravel queue worker</td><td><code>php artisan queue:listen</code></td><td>Webhook delivery jobs, mail, etc.</td></tr>
+          <tr><td>4</td><td>Webhook consumer</td><td><code>php artisan webhooks:consume</code></td><td>Turns Go/Laravel webhook events into delivery jobs</td></tr>
+          <tr><td>5</td><td>Go transcode worker</td><td><code>go run ./cmd/worker</code> (in <code>golang-queue/</code>)</td><td>VOD transcoding (ffmpeg → HLS)</td></tr>
+          <tr><td>6</td><td>Go live service</td><td><code>go run ./cmd/live</code> (in <code>golang-live/</code>)</td><td>Live streaming (RTMP ingest + HLS)</td></tr>
+          <tr><td>7</td><td>Laravel scheduler</td><td><code>php artisan schedule:work</code></td><td>Periodic tasks — daily prune of old viewer rollups (<code>rollups:prune</code>)</td></tr>
+        </tbody>
+      </table>
+      <p>
+        <code>composer run dev</code> bundles <strong>1–3 + logs</strong> into one command.
+        <strong>4, 5, 6, and 7 are always separate.</strong> Skip 6 if you are not using live streaming. Skip 7 in
+        short dev sessions — it only matters for long-running/production environments.
+      </p>
+
+      <h2 id="prerequisites">Prerequisites</h2>
+      <p>Install these first:</p>
+      <ul>
+        <li><strong>PHP 8.4</strong> + <strong>Composer</strong></li>
+        <li><strong>Node 20+</strong> + <strong>npm</strong></li>
+        <li><strong>Go 1.25+</strong></li>
+        <li><strong>FFmpeg</strong> (<code>ffmpeg</code> + <code>ffprobe</code> on <code>PATH</code>) — required by the transcode worker</li>
+        <li><strong>PostgreSQL</strong> — shared by Laravel and both Go services</li>
+        <li><strong>Redis</strong> — job + webhook queues</li>
+        <li><strong>S3</strong> — an AWS bucket, or an S3-compatible server locally such as RustFS or MinIO (separate source + streaming buckets recommended)</li>
+      </ul>
+
+      <h2 id="local-s3">Local S3 with RustFS</h2>
+      <p>
+        For local development you don't need a real AWS account.
+        <a href="https://docs.rustfs.com/installation/docker/">RustFS</a> is an S3-compatible server you can run in
+        Docker. (MinIO works the same way if you prefer it.)
+      </p>
+      <p>Start RustFS:</p>
+      <pre><code class="language-bash">docker run -d \
+  --name rustfs_local \
+  -p 9000:9000 \
+  -p 9001:9001 \
+  -v /mnt/rustfs/data:/data \
+  -e RUSTFS_ACCESS_KEY=rustfsadmin \
+  -e RUSTFS_SECRET_KEY=rustfsadmin \
+  -e RUSTFS_CONSOLE_ENABLE=true \
+  rustfs/rustfs:latest \
+  /data</code></pre>
+      <ul>
+        <li>S3 API endpoint: <code>http://localhost:9000</code></li>
+        <li>Web console: <code>http://localhost:9001</code></li>
+        <li>Default credentials: access key <code>rustfsadmin</code>, secret key <code>rustfsadmin</code></li>
+      </ul>
+      <blockquote>
+        The data volume must be writable by user id <code>10001</code>:
+        <code>sudo chown -R 10001:10001 /mnt/rustfs/data</code>.
+      </blockquote>
+      <p>
+        Open the console at <code>http://localhost:9001</code>, log in, and create two buckets:
+        <code>oxygen-source</code> and <code>oxygen-streaming</code>.
+      </p>
+      <p>
+        Then point the Laravel <code>.env</code> (and the Go services) at it. The key extra settings for an
+        S3-compatible endpoint are the endpoint URL and <strong>path-style</strong> addressing:
+      </p>
+      <pre><code class="language-ini">AWS_ACCESS_KEY_ID=rustfsadmin
+AWS_SECRET_ACCESS_KEY=rustfsadmin
+AWS_DEFAULT_REGION=us-east-1
+AWS_BUCKET=oxygen-source
+AWS_ENDPOINT=http://localhost:9000
+AWS_USE_PATH_STYLE_ENDPOINT=true</code></pre>
+      <p>
+        The Go worker uses the same endpoint via its <code>SOURCE_AWS_*</code> / <code>STREAMING_AWS_*</code> values
+        (set the matching endpoint/path-style options in <code>golang-queue/.env</code>).
+      </p>
+
+      <h2 id="step-1">Step 1 — Configure and set up the Laravel app</h2>
+      <pre><code class="language-bash"># from the repo root (oxygen/)
+composer run setup     # installs deps, copies .env, generates key, migrates, builds frontend</code></pre>
+      <p>Then edit <code>.env</code> and set at least:</p>
+      <pre><code class="language-ini"># Database (shared with the Go services)
+DB_CONNECTION=pgsql
+DB_HOST=127.0.0.1
+DB_PORT=5432
+DB_DATABASE=oxygen
+DB_USERNAME=postgres
+DB_PASSWORD=secret
+
+# Redis
+REDIS_HOST=127.0.0.1
+REDIS_PORT=6379
+
+# S3 (source uploads + streaming output)
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_DEFAULT_REGION=us-east-1
+AWS_BUCKET=oxygen-source
+
+# Live streaming (must match the golang-live env — see Live Streaming section)
+LIVE_RTMP_URL=rtmp://127.0.0.1:1935/live
+LIVE_HLS_URL=http://127.0.0.1:8081/live
+LIVE_SERVICE_TOKEN=change-me-live-service-token
+LIVE_CONTROL_URL=http://127.0.0.1:8081
+LIVE_CONTROL_TOKEN=change-me-live-control-token</code></pre>
+      <p>Re-run migrations if you set up the DB after <code>setup</code>: <code>php artisan migrate</code>.</p>
+
+      <h3 id="disabling-registration">Disabling public registration</h3>
+      <p>
+        Public sign-up is controlled by <code>ALLOW_REGISTER</code> in <code>.env</code>. Set it to <code>false</code>
+        to turn off the registration route and hide the register link in the UI:
+      </p>
+      <pre><code class="language-ini">ALLOW_REGISTER=false</code></pre>
+      <p>
+        It defaults to enabled. The flag is read in <code>config/fortify.php</code> (conditionally includes
+        <code>Features::registration()</code>); the frontend hides the register link via the <code>canRegister</code>
+        prop. After changing it, run <code>php artisan config:clear</code>.
+      </p>
+
+      <h2 id="step-2">Step 2 — Start the core Laravel stack</h2>
+      <pre><code class="language-bash">composer run dev</code></pre>
+      <p>
+        This runs the web server (<code>http://127.0.0.1:8000</code>), the queue worker, log tailing
+        (<code>pail</code>), and Vite — all in one terminal.
+      </p>
+      <blockquote>
+        Running under <strong>Laravel Octane / FrankenPHP</strong> instead? Use <code>composer run dev:octane</code>
+        (octane with <code>--watch</code> + queue + logs + vite), or run
+        <code>php artisan octane:start --max-requests=500</code> standalone. Either way, still run the webhook consumer
+        and Go services separately. See the Octane notes in <code>CLAUDE.md</code>.
+      </blockquote>
+
+      <h2 id="step-3">Step 3 — Start the webhook consumer (new terminal)</h2>
+      <pre><code class="language-bash">php artisan webhooks:consume</code></pre>
+      <p>
+        This drains webhook events (pushed by the Go worker and Laravel) and dispatches <code>SendWebhookJob</code>s.
+        Skip if you are not using webhooks.
+      </p>
+
+      <h2 id="step-4">Step 4 — Start the Go transcode worker (new terminal)</h2>
+      <pre><code class="language-bash">cd golang-queue
+cp .env.example .env     # first time only
+# edit .env: REDIS_ADDR, QUEUE_KEY, DB_*, AWS_* / SOURCE_AWS_* / STREAMING_AWS_*, FFMPEG_BIN
+go run ./cmd/worker</code></pre>
+      <p>Key env values (see <code>golang-queue/.env.example</code> for the full list):</p>
+      <pre><code class="language-ini">REDIS_ADDR=127.0.0.1:6379
+QUEUE_KEY=oxygen-database-queues:transcode   # must match Laravel's queue key
+DB_HOST=127.0.0.1
+DB_DATABASE=oxygen
+SOURCE_AWS_BUCKET=oxygen-source
+STREAMING_AWS_BUCKET=oxygen-streaming
+FFMPEG_BIN=ffmpeg</code></pre>
+      <p>
+        The worker BRPOPs from <code>QUEUE_KEY</code>, reads the profile from Postgres, runs ffmpeg, and uploads the HLS
+        tree to the streaming bucket.
+      </p>
+
+      <h2 id="step-5">Step 5 — Start the Go live service (new terminal, optional)</h2>
+      <p>Only needed for live streaming. Tokens <strong>must match</strong> the Laravel <code>.env</code> from Step 1.</p>
+      <pre><code class="language-bash">cd golang-live
+LIVE_ADDR=:8081 \
+LIVE_RTMP_ADDR=:1935 \
+LIVE_HLS_ROOT=/tmp/oxygen-live/hls \
+LARAVEL_URL=http://127.0.0.1:8000 \
+LIVE_SERVICE_TOKEN=change-me-live-service-token \
+LIVE_CONTROL_TOKEN=change-me-live-control-token \
+go run ./cmd/live</code></pre>
+      <p>See <a href="live-streaming.html">Live Streaming</a> for the OBS setup and full endpoint list.</p>
+
+      <h2 id="step-6">Step 6 — Start the Laravel scheduler (new terminal, optional in dev)</h2>
+      <pre><code class="language-bash">php artisan schedule:work</code></pre>
+      <p>
+        This runs scheduled tasks — currently the daily <code>rollups:prune</code>, which deletes per-minute live viewer
+        rollups older than 30 days (session summaries are kept). In production, prefer a single cron entry instead:
+      </p>
+      <pre><code class="language-bash">* * * * * cd /path/to/oxygen && php artisan schedule:run >> /dev/null 2>&1</code></pre>
+      <p>Run a one-off prune manually with <code>php artisan rollups:prune --days=30</code>.</p>
+
+      <h2 id="step-7">Step 7 — Verify</h2>
+      <ol>
+        <li>Open <code>http://127.0.0.1:8000</code> and register (creates an org and logs you in as admin).</li>
+        <li>Upload a video under <strong>Manage</strong> — it goes straight to S3, then a job lands on Redis.</li>
+        <li>Watch the <strong>Go transcode worker</strong> terminal pick it up; the file status moves <code>uploaded → progress → success</code>.</li>
+        <li>For live: create a live stream in the admin UI, point OBS at it, and watch playback.</li>
+      </ol>
+    </article>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script type="module" src="assets/app.js"></script>
+  </body>
+</html>
