@@ -66,6 +66,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         supervisor \
         ca-certificates \
+        curl \
     && rm -rf /var/lib/apt/lists/*
 
 # PHP extensions required by Laravel + Octane + Postgres/Redis.
@@ -107,6 +108,10 @@ RUN mkdir -p storage/framework/{cache,sessions,views} storage/logs bootstrap/cac
 
 # Ports: 8000 web/Octane, 8081 live HTTP/HLS, 1935 RTMP ingest.
 EXPOSE 8000 8081 1935
+
+# Catches an Octane/FrankenPHP hang even while the Go services stay up.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:8000/up || exit 1
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["supervisord", "-c", "/etc/supervisor/conf.d/oxygen.conf", "-n"]
