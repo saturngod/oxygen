@@ -1,0 +1,45 @@
+# Dependencies / build output (rebuilt inside the image)
+node_modules
+vendor
+public/build
+public/hot
+bootstrap/cache/*.php
+
+# Local frankenphp binary (macOS arm64) — not used in the Linux image
+frankenphp
+
+# Go build artifacts
+golang-queue/bin
+golang-live/bin
+
+# Env & secrets — inject via Dokploy environment instead
+.env
+.env.*
+!.env.example
+
+# VCS / tooling / editor
+.git
+.github
+.idea
+.vscode
+.DS_Store
+**/.DS_Store
+
+# Tests & docs (not needed at runtime)
+tests
+docs
+*.md
+encode-list-example.png
+
+# Logs & local storage
+storage/logs/*
+storage/framework/cache/*
+storage/framework/sessions/*
+storage/framework/views/*
+
+# AI/agent tooling dirs
+.agents
+.claude
+.codex
+.gemini
+.antigravitycli
