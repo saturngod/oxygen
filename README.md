@@ -79,20 +79,20 @@ graph TB
 
     subgraph data["Shared Infrastructure (managed)"]
         PG[(Postgres)]
-        REDIS[(Redis<br/>job + webhook queues)]
+        REDIS[(Redis<br/>DB0 queues · DB1 cache)]
         S3SRC[(S3 — Source bucket)]
         S3STR[(S3 — Streaming bucket)]
     end
 
-    BROWSER -->|HTTPS| LARAVEL
+    BROWSER -->|HTTPS dashboard + API| LARAVEL
     BROWSER -->|direct multipart upload| S3SRC
-    BROWSER -->|HLS| CDN
-    CDN --> S3STR
-    CDN --> LIVE
-    OBS -->|RTMP| LIVE
+    BROWSER -->|HLS playback| CDN
+    CDN -->|origin pull · VOD HLS| S3STR
+    CDN -->|origin pull · live HLS| LIVE
+    OBS -->|RTMP publish| LIVE
 
     LARAVEL --> PG
-    LARAVEL --> REDIS
+    LARAVEL -->|cache + queue| REDIS
     LARAVEL -->|presign| S3SRC
     LARAVEL <-->|control + callbacks| LIVE
 
@@ -108,6 +108,8 @@ graph TB
     LIVE --> PG
 ```
 
+**Playback never touches Laravel.** Video bytes flow Browser → CDN → origin, where the origin is the **streaming S3 bucket** for VOD and the **Go live service** for live. Laravel is the control plane only — it issues presigned upload URLs, stores stream records and keys, and receives session/viewer callbacks. The browser uploads source files **directly to S3** too, so Laravel never proxies media in either direction.
+
 ### Why separate services
 
 | Service | Deploy as | Scaling axis | Notes |
@@ -118,7 +120,7 @@ graph TB
 | **Go transcode worker** | Standalone binary, CPU/GPU-optimized nodes | Horizontal — more workers and/or `WORKER_CONCURRENCY` | FFmpeg is CPU/GPU heavy; isolate from web nodes so transcoding never starves the dashboard. Scale to match queue depth. |
 | **Go live service** | Standalone binary with public RTMP + HLS ports | Per-stream / per-region; sticky by stream | Stateful per active broadcast (local HLS root). Put a CDN in front of HLS. Co-locate near publishers to cut latency. |
 | **Postgres** | Managed instance (e.g. RDS / Cloud SQL) | Vertical + read replicas | Single source of truth shared by Laravel and both Go services. |
-| **Redis** | Managed instance | Vertical; cluster if needed | Job + webhook queues (raw LPUSH/BRPOP). Also session/cache for Laravel. |
+| **Redis** | Managed instance | Vertical; cluster if needed | Job + webhook queues (raw LPUSH/BRPOP) on DB 0, and the Laravel application cache on DB 1. Keep the two on separate logical DBs so `cache:clear` never wipes queued jobs. |
 | **S3** | Object storage | Effectively unlimited | Separate **source** and **streaming** buckets. Front the streaming bucket with a CDN. |
 
 ### Deployment principles
@@ -126,8 +128,9 @@ graph TB
 - **One process per container.** Web, queue worker, scheduler, transcode worker, and live service each get their own image/process and lifecycle. They communicate only through Postgres, Redis, S3, and the documented HTTP callbacks — never in-process.
 - **Scale the bottleneck, not the whole app.** Transcoding is CPU/GPU-bound; add transcode workers. Dashboard traffic is HTTP-bound; add Laravel replicas. The two scale independently because they share nothing but the datastores.
 - **Keep transcoding off the web nodes.** A long FFmpeg job must never compete with dashboard requests. Run the Go worker on separate (ideally GPU) nodes.
-- **Put a CDN in front of HLS.** Both VOD (streaming bucket) and live (Go live service) output HLS — cache it at the edge so origin load stays flat as viewers grow. See the CDN cache headers already set by the live service.
+- **Put a CDN in front of HLS.** Both VOD (streaming bucket) and live (Go live service) output HLS — cache it at the edge so origin load stays flat as viewers grow. The Go live service already sets CDN-friendly headers (`no-cache` for `.m3u8` playlists, `public, max-age=31536000, immutable` for segments). VOD segments uploaded to the streaming bucket are immutable too, but `UploadHLS()` does not yet set an explicit `Cache-Control` — set a long-TTL/immutable policy on the streaming bucket or in the CDN so VOD segments cache as aggressively as live ones.
 - **Managed datastores.** Treat Postgres, Redis, and S3 as managed/external services. Every app service is otherwise stateless except the Go live service, which holds per-broadcast HLS on local disk.
+- **Redis cache vs. queue.** Laravel uses Redis for both the application cache (`CACHE_STORE=redis`, DB 1) and the transcode/webhook queues (DB 0). They live on separate logical databases so `php artisan cache:clear` only flushes the cache, leaving queued jobs intact. Never run `FLUSHALL`. If your managed Redis exposes only a single database (some clusters do), give cache and queue **separate Redis instances** instead of relying on the DB split.
 - **Network boundaries.** Only Laravel web and the Go live service need public ingress (HTTP + RTMP/HLS). Queue workers, the scheduler, and the transcode worker need no inbound ports — only outbound access to the datastores. The `/internal/live/*` callbacks are authenticated by a shared service token, not session auth.
 
 For local development you run all of these on one machine; see the next section. The split above is the **production** topology.
@@ -220,9 +223,12 @@ DB_DATABASE=oxygen
 DB_USERNAME=postgres
 DB_PASSWORD=secret
 
-# Redis
+# Redis (queues + cache)
 REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
+CACHE_STORE=redis
+REDIS_DB=0          # default connection — queues live here
+REDIS_CACHE_DB=1    # cache connection — separate DB so cache:clear can't wipe jobs
 
 # S3 (source uploads + streaming output)
 AWS_ACCESS_KEY_ID=...
@@ -689,7 +695,8 @@ Every layer enforces org isolation:
 | Live service | Go 1.25 (standalone HTTP service) |
 | Transcoding | FFmpeg (subprocess) — VideoToolbox / NVENC / libx264 |
 | Database | Postgres (shared between Laravel & Go) |
-| Queue | Redis (raw LPUSH/BRPOP, not Laravel Queues) |
+| Queue | Redis DB 0 (raw LPUSH/BRPOP, not Laravel Queues) |
+| Cache | Redis DB 1 (`CACHE_STORE=redis`, separate DB from the queue) |
 | Storage | Amazon S3 (separate source + streaming buckets) |
 
 ## Development

@@ -129,6 +129,138 @@ graph LR
         live service handles RTMP ingest, validates publishers against Laravel, remuxes the stream into HLS, serves
         playback, and reports session and viewer state back to Laravel.
       </p>
+
+      <h2 id="deployment-architecture">Recommended Deployment Architecture</h2>
+      <p>
+        In production, run each concern as its <strong>own independently deployable service</strong>. Oxygen is built as
+        a set of decoupled processes that only share Postgres, Redis, and S3 — so each can be deployed, scaled,
+        restarted, and monitored on its own. Do not run everything in one container.
+      </p>
+
+      <pre class="mermaid">
+graph TB
+    subgraph edge["Edge / Clients"]
+        BROWSER[Browser&lt;br/&gt;React Dashboard + Player]
+        OBS[OBS / RTMP Publisher]
+        CDN[CDN&lt;br/&gt;HLS playback cache]
+    end
+
+    subgraph app["Application Services (scale independently)"]
+        LARAVEL[Laravel Web&lt;br/&gt;Octane / FrankenPHP&lt;br/&gt;dashboard + API + control plane]
+        QUEUEW[Laravel Queue + Webhook Consumer&lt;br/&gt;queue:listen / webhooks:consume]
+        SCHED[Laravel Scheduler&lt;br/&gt;cron schedule:run]
+        TRANSCODER[Go Transcode Worker&lt;br/&gt;FFmpeg HLS&lt;br/&gt;scale by # of workers]
+        LIVE[Go Live Service&lt;br/&gt;RTMP ingest + live HLS]
+    end
+
+    subgraph data["Shared Infrastructure (managed)"]
+        PG[(Postgres)]
+        REDIS[(Redis&lt;br/&gt;DB0 queues · DB1 cache)]
+        S3SRC[(S3 — Source bucket)]
+        S3STR[(S3 — Streaming bucket)]
+    end
+
+    BROWSER --&gt;|HTTPS dashboard + API| LARAVEL
+    BROWSER --&gt;|direct multipart upload| S3SRC
+    BROWSER --&gt;|HLS playback| CDN
+    CDN --&gt;|origin pull · VOD HLS| S3STR
+    CDN --&gt;|origin pull · live HLS| LIVE
+    OBS --&gt;|RTMP publish| LIVE
+
+    LARAVEL --&gt; PG
+    LARAVEL --&gt;|cache + queue| REDIS
+    LARAVEL --&gt;|presign| S3SRC
+    LARAVEL &lt;--&gt;|control + callbacks| LIVE
+
+    QUEUEW --&gt; REDIS
+    QUEUEW --&gt; PG
+    SCHED --&gt; PG
+
+    TRANSCODER --&gt;|BRPOP jobs| REDIS
+    TRANSCODER --&gt; PG
+    TRANSCODER --&gt;|download source| S3SRC
+    TRANSCODER --&gt;|upload HLS| S3STR
+
+    LIVE --&gt; PG
+      </pre>
+
+      <p>
+        <strong>Playback never touches Laravel.</strong> Video bytes flow Browser → CDN → origin, where the origin is
+        the <strong>streaming S3 bucket</strong> for VOD and the <strong>Go live service</strong> for live. Laravel is
+        the control plane only — it issues presigned upload URLs, stores stream records and keys, and receives
+        session/viewer callbacks. The browser uploads source files <strong>directly to S3</strong> too, so Laravel never
+        proxies media in either direction.
+      </p>
+
+      <h3 id="why-separate-services">Why separate services</h3>
+      <table>
+        <thead>
+          <tr><th>Service</th><th>Deploy as</th><th>Scaling axis</th><th>Notes</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Laravel web (dashboard + API + control plane)</strong></td>
+            <td>Octane / FrankenPHP container behind a load balancer</td>
+            <td>Horizontal (stateless HTTP) — add replicas</td>
+            <td>Session in Redis/DB so replicas share state. No request state in singletons (Octane rule).</td>
+          </tr>
+          <tr>
+            <td><strong>Laravel queue + webhook consumer</strong></td>
+            <td>Long-running worker container(s)</td>
+            <td>Horizontal — add workers for more throughput</td>
+            <td>Runs <code>queue:listen</code> + <code>webhooks:consume</code>. Restart on deploy to pick up new code.</td>
+          </tr>
+          <tr>
+            <td><strong>Laravel scheduler</strong></td>
+            <td>A single cron entry (<code>schedule:run</code>)</td>
+            <td>Run exactly <strong>one</strong> instance</td>
+            <td>Do not run multiple — duplicate scheduled tasks.</td>
+          </tr>
+          <tr>
+            <td><strong>Go transcode worker</strong></td>
+            <td>Standalone binary, CPU/GPU-optimized nodes</td>
+            <td>Horizontal — more workers and/or <code>WORKER_CONCURRENCY</code></td>
+            <td>FFmpeg is CPU/GPU heavy; isolate from web nodes so transcoding never starves the dashboard. Scale to match queue depth.</td>
+          </tr>
+          <tr>
+            <td><strong>Go live service</strong></td>
+            <td>Standalone binary with public RTMP + HLS ports</td>
+            <td>Per-stream / per-region; sticky by stream</td>
+            <td>Stateful per active broadcast (local HLS root). Put a CDN in front of HLS. Co-locate near publishers to cut latency.</td>
+          </tr>
+          <tr>
+            <td><strong>Postgres</strong></td>
+            <td>Managed instance (e.g. RDS / Cloud SQL)</td>
+            <td>Vertical + read replicas</td>
+            <td>Single source of truth shared by Laravel and both Go services.</td>
+          </tr>
+          <tr>
+            <td><strong>Redis</strong></td>
+            <td>Managed instance</td>
+            <td>Vertical; cluster if needed</td>
+            <td>Job + webhook queues (raw LPUSH/BRPOP) on DB 0, and the Laravel application cache on DB 1. Keep the two on separate logical DBs so <code>cache:clear</code> never wipes queued jobs.</td>
+          </tr>
+          <tr>
+            <td><strong>S3</strong></td>
+            <td>Object storage</td>
+            <td>Effectively unlimited</td>
+            <td>Separate <strong>source</strong> and <strong>streaming</strong> buckets. Front the streaming bucket with a CDN.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h3 id="deployment-principles">Deployment principles</h3>
+      <ul>
+        <li><strong>One process per container.</strong> Web, queue worker, scheduler, transcode worker, and live service each get their own image/process and lifecycle. They communicate only through Postgres, Redis, S3, and the documented HTTP callbacks — never in-process.</li>
+        <li><strong>Scale the bottleneck, not the whole app.</strong> Transcoding is CPU/GPU-bound; add transcode workers. Dashboard traffic is HTTP-bound; add Laravel replicas. The two scale independently because they share nothing but the datastores.</li>
+        <li><strong>Keep transcoding off the web nodes.</strong> A long FFmpeg job must never compete with dashboard requests. Run the Go worker on separate (ideally GPU) nodes.</li>
+        <li><strong>Put a CDN in front of HLS.</strong> Both VOD (streaming bucket) and live (Go live service) output HLS — cache it at the edge so origin load stays flat as viewers grow. The Go live service already sets CDN-friendly headers (<code>no-cache</code> for <code>.m3u8</code> playlists, <code>public, max-age=31536000, immutable</code> for segments). VOD segments uploaded to the streaming bucket are immutable too, but <code>UploadHLS()</code> does not yet set an explicit <code>Cache-Control</code> — set a long-TTL/immutable policy on the streaming bucket or in the CDN so VOD segments cache as aggressively as live ones.</li>
+        <li><strong>Managed datastores.</strong> Treat Postgres, Redis, and S3 as managed/external services. Every app service is otherwise stateless except the Go live service, which holds per-broadcast HLS on local disk.</li>
+        <li><strong>Redis cache vs. queue.</strong> Laravel uses Redis for both the application cache (<code>CACHE_STORE=redis</code>, DB 1) and the transcode/webhook queues (DB 0). They live on separate logical databases so <code>php artisan cache:clear</code> only flushes the cache, leaving queued jobs intact. Never run <code>FLUSHALL</code>. If your managed Redis exposes only a single database (some clusters do), give cache and queue <strong>separate Redis instances</strong> instead of relying on the DB split.</li>
+        <li><strong>Network boundaries.</strong> Only Laravel web and the Go live service need public ingress (HTTP + RTMP/HLS). Queue workers, the scheduler, and the transcode worker need no inbound ports — only outbound access to the datastores. The <code>/internal/live/*</code> callbacks are authenticated by a shared service token, not session auth.</li>
+      </ul>
+
+      <p>For local development you run all of these on one machine; see <a href="getting-started.html">Getting Started</a>. The split above is the <strong>production</strong> topology.</p>
     </article>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>

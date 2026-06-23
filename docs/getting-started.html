@@ -60,7 +60,7 @@
         <li><strong>Go 1.25+</strong></li>
         <li><strong>FFmpeg</strong> (<code>ffmpeg</code> + <code>ffprobe</code> on <code>PATH</code>) — required by the transcode worker</li>
         <li><strong>PostgreSQL</strong> — shared by Laravel and both Go services</li>
-        <li><strong>Redis</strong> — job + webhook queues</li>
+        <li><strong>Redis</strong> — job + webhook queues (DB 0) and the Laravel application cache (DB 1)</li>
         <li><strong>S3</strong> — an AWS bucket, or an S3-compatible server locally such as RustFS or MinIO (separate source + streaming buckets recommended)</li>
       </ul>
 
@@ -121,9 +121,12 @@ DB_DATABASE=oxygen
 DB_USERNAME=postgres
 DB_PASSWORD=secret
 
-# Redis
+# Redis (queues + cache)
 REDIS_HOST=127.0.0.1
 REDIS_PORT=6379
+CACHE_STORE=redis
+REDIS_DB=0          # default connection — queues live here
+REDIS_CACHE_DB=1    # cache connection — separate DB so cache:clear can't wipe jobs
 
 # S3 (source uploads + streaming output)
 AWS_ACCESS_KEY_ID=...

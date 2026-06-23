@@ -40,7 +40,8 @@
           <tr><td>Live service</td><td>Go 1.25 (standalone HTTP service)</td></tr>
           <tr><td>Transcoding</td><td>FFmpeg (subprocess) — VideoToolbox / NVENC / libx264</td></tr>
           <tr><td>Database</td><td>Postgres (shared between Laravel &amp; Go)</td></tr>
-          <tr><td>Queue</td><td>Redis (raw LPUSH/BRPOP, not Laravel Queues)</td></tr>
+          <tr><td>Queue</td><td>Redis DB 0 (raw LPUSH/BRPOP, not Laravel Queues)</td></tr>
+          <tr><td>Cache</td><td>Redis DB 1 (<code>CACHE_STORE=redis</code>, separate DB from the queue)</td></tr>
           <tr><td>Storage</td><td>Amazon S3 (separate source + streaming buckets)</td></tr>
         </tbody>
       </table>
