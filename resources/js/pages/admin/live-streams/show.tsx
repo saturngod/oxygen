@@ -343,6 +343,14 @@ export default function ShowLiveStream({ organization, liveStream }: Props) {
         5000,
         {
             only: ['liveStream'],
+            // Don't re-send the long-lived publishing credentials on every 5s
+            // tick; they're delivered once on the full page load and never
+            // change during polling.
+            except: [
+                'liveStream.stream_key',
+                'liveStream.rtmp_url',
+                'liveStream.stream_path',
+            ],
         },
         {
             autoStart:

@@ -150,6 +150,55 @@ test('rotating a live stream key requires restart', function () {
         ->and($liveStream->settings_version)->toBe(2);
 });
 
+test('disabling a live stream kicks the active publisher', function () {
+    [$user, $organization] = liveStreamAdmin();
+    $liveStream = LiveStream::factory()
+        ->for($organization)
+        ->live()
+        ->create();
+
+    config([
+        'services.live.control_url' => 'http://live-service.test',
+        'services.live.control_token' => 'control-secret',
+    ]);
+
+    Http::fake([
+        'http://live-service.test/streams/'.$liveStream->public_id.'/restart' => Http::response(['ok' => true]),
+    ]);
+
+    $this->actingAs($user)
+        ->post(route('admin.organizations.live-streams.disable', [$organization, $liveStream]))
+        ->assertRedirect(route('admin.organizations.live-streams.index', $organization));
+
+    $liveStream->refresh();
+
+    expect($liveStream->status)->toBe(LiveStreamStatus::Disabled);
+
+    Http::assertSentCount(1);
+});
+
+test('disabling an idle live stream does not call the control service', function () {
+    [$user, $organization] = liveStreamAdmin();
+    $liveStream = LiveStream::factory()
+        ->for($organization)
+        ->create(['status' => LiveStreamStatus::Idle]);
+
+    config([
+        'services.live.control_url' => 'http://live-service.test',
+        'services.live.control_token' => 'control-secret',
+    ]);
+
+    Http::fake();
+
+    $this->actingAs($user)
+        ->post(route('admin.organizations.live-streams.disable', [$organization, $liveStream]))
+        ->assertRedirect(route('admin.organizations.live-streams.index', $organization));
+
+    expect($liveStream->refresh()->status)->toBe(LiveStreamStatus::Disabled);
+
+    Http::assertNothingSent();
+});
+
 test('restart calls live control service and marks stream restarting', function () {
     [$user, $organization] = liveStreamAdmin();
     $liveStream = LiveStream::factory()

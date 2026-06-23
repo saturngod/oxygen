@@ -37,9 +37,13 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::middleware(EnsureOrganizationMember::class)->group(function () {
         Route::get('manage', [ManageController::class, 'index'])->name('manage');
         Route::post('manage/folders', [ManageController::class, 'storeFolder'])->name('manage.folders.store');
-        Route::post('manage/files/url', [ManageController::class, 'storeFromUrl'])->name('manage.files.url');
+        Route::post('manage/files/url', [ManageController::class, 'storeFromUrl'])
+            ->middleware('throttle:10,1')
+            ->name('manage.files.url');
         Route::delete('manage/files/{mediaFile}', [ManageController::class, 'destroyFile'])->name('manage.files.destroy');
-        Route::post('manage/files/multipart/init', [ManageController::class, 'initMultipartUpload'])->name('manage.files.multipart.init');
+        Route::post('manage/files/multipart/init', [ManageController::class, 'initMultipartUpload'])
+            ->middleware('throttle:20,1')
+            ->name('manage.files.multipart.init');
         Route::post('manage/files/multipart/sign-part', [ManageController::class, 'signPart'])->name('manage.files.multipart.sign');
         Route::post('manage/files/multipart/complete', [ManageController::class, 'completeMultipartUpload'])->name('manage.files.multipart.complete');
         Route::post('manage/files/multipart/abort', [ManageController::class, 'abortMultipartUpload'])->name('manage.files.multipart.abort');

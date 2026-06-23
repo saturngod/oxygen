@@ -197,6 +197,29 @@ test('url import requires a valid url', function () {
         ->assertSessionHasErrors('source_url');
 });
 
+test('url import rejects private and metadata addresses', function () {
+    [$user, $org, $profile] = manageActor();
+
+    foreach ([
+        'http://169.254.169.254/latest/meta-data/',
+        'http://127.0.0.1/internal',
+        'http://localhost:6379/',
+        'http://10.0.0.5/video.mp4',
+        'http://192.168.1.10/video.mp4',
+    ] as $url) {
+        $this->actingAs($user)
+            ->withSession(['current_organization_id' => $org->getKey()])
+            ->post('/manage/files/url', [
+                'title' => 'SSRF',
+                'source_url' => $url,
+                'profile_id' => $profile->id,
+            ])
+            ->assertSessionHasErrors('source_url');
+    }
+
+    expect(MediaFile::query()->count())->toBe(0);
+});
+
 test('init multipart upload returns upload id and caches session', function () {
     [$user, $org, $profile] = manageActor();
 

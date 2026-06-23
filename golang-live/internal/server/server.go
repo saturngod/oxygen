@@ -141,6 +141,10 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) authPublish(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeControl(w, r) {
+		return
+	}
+
 	var req AuthPublishRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -157,6 +161,10 @@ func (s *Server) authPublish(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) sessionStart(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeControl(w, r) {
+		return
+	}
+
 	var req SessionStartedRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -177,6 +185,10 @@ func (s *Server) sessionStart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) sessionEnd(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeControl(w, r) {
+		return
+	}
+
 	var payload map[string]any
 	if !decodeJSON(w, r, &payload) {
 		return
@@ -197,6 +209,10 @@ func (s *Server) sessionEnd(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) sessionFail(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeControl(w, r) {
+		return
+	}
+
 	var payload map[string]any
 	if !decodeJSON(w, r, &payload) {
 		return

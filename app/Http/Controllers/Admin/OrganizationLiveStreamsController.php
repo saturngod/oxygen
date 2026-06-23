@@ -125,6 +125,10 @@ class OrganizationLiveStreamsController extends Controller
                 'id' => $liveStream->id,
                 'title' => $liveStream->title,
                 'public_id' => $liveStream->public_id,
+                // Publishing credentials change only on rotate/settings updates.
+                // They are sent on the full page load, but the 5s viewer poll
+                // excludes them (see usePoll `except` in show.tsx) so the
+                // long-lived stream key is not re-transmitted on every tick.
                 'stream_key' => $liveStream->stream_key,
                 'stream_path' => $liveStream->public_id,
                 'status' => $liveStream->status->value,
@@ -229,15 +233,27 @@ class OrganizationLiveStreamsController extends Controller
             ->with('toast', ['type' => 'success', 'message' => __('Restart requested.')]);
     }
 
-    public function disable(Organization $organization, LiveStream $liveStream): RedirectResponse
-    {
+    public function disable(
+        Organization $organization,
+        LiveStream $liveStream,
+        LiveStreamControlClient $client,
+    ): RedirectResponse {
         $this->authorize('manage', $organization);
         abort_unless($liveStream->organization_id === $organization->id, 404);
+
+        $wasLive = $liveStream->isLive();
 
         $liveStream->forceFill([
             'status' => LiveStreamStatus::Disabled,
             'restart_required' => false,
         ])->save();
+
+        // RTMP auth only happens at connect time, so an already-connected
+        // publisher keeps streaming after the status flips to Disabled. Kick it
+        // now so "disable" actually stops an in-progress broadcast.
+        if ($wasLive) {
+            $client->restart($liveStream);
+        }
 
         return to_route('admin.organizations.live-streams.index', $organization)
             ->with('toast', ['type' => 'success', 'message' => __('Live stream disabled.')]);

@@ -41,6 +41,27 @@ func TestRestartRequiresControlToken(t *testing.T) {
 	}
 }
 
+func TestSessionEndpointsRequireControlToken(t *testing.T) {
+	srv := New(config.Config{
+		ControlToken:   "secret",
+		ViewerTTL:      45 * time.Second,
+		RollupInterval: time.Hour,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	endpoints := []string{"/ingest/auth", "/sessions/start", "/sessions/end", "/sessions/fail"}
+
+	for _, endpoint := range endpoints {
+		req := httptest.NewRequest(http.MethodPost, endpoint, nil)
+		res := httptest.NewRecorder()
+
+		srv.Routes().ServeHTTP(res, req)
+
+		if res.Code != http.StatusForbidden {
+			t.Fatalf("%s without token: expected 403, got %d", endpoint, res.Code)
+		}
+	}
+}
+
 func TestPublishCredentialsParsesOBSStyleStreamKey(t *testing.T) {
 	u, err := url.Parse("rtmp://127.0.0.1:1935/live/public-1?key=secret-key")
 	if err != nil {

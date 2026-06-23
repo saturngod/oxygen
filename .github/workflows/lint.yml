@@ -15,7 +15,7 @@ on:
       - workos
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   quality:

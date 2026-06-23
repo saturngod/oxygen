@@ -57,10 +57,20 @@ class OrganizationProfilesController extends Controller
         $this->authorize('manage', $organization);
 
         $validated = $request->validated();
-        $hasDefault = $organization->profiles()->where('is_default', true)->exists();
-        $validated['is_default'] = ! $hasDefault;
 
-        $organization->profiles()->create($validated);
+        DB::transaction(function () use ($organization, $validated): void {
+            // Lock existing default rows so two concurrent stores cannot both read
+            // "no default" and each create a default, breaking the one-default-per-org
+            // invariant. Matches the locking approach used in makeDefault().
+            $hasDefault = $organization->profiles()
+                ->where('is_default', true)
+                ->lockForUpdate()
+                ->exists();
+
+            $validated['is_default'] = ! $hasDefault;
+
+            $organization->profiles()->create($validated);
+        });
 
         return to_route('admin.organizations.profiles.index', $organization)
             ->with('toast', ['type' => 'success', 'message' => __('Profile created.')]);

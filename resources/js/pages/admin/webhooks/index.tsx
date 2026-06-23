@@ -321,6 +321,11 @@ export default function OrganizationWebhooks({
                 onOpenChange={(open) => {
                     if (!open) {
                         setPendingDelete(null);
+                        // Reset here too: onFinish only fires when the in-flight
+                        // request completes, so dismissing mid-request would
+                        // otherwise leave processing=true and disable the next
+                        // webhook's delete dialog.
+                        setProcessing(false);
                     }
                 }}
             >

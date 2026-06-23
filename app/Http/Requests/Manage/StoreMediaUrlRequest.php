@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\Manage;
 
+use App\Rules\PublicUrl;
 use Illuminate\Contracts\Validation\ValidationRule;
 use Illuminate\Foundation\Http\FormRequest;
 
@@ -19,7 +20,7 @@ class StoreMediaUrlRequest extends FormRequest
     {
         return [
             'title' => ['required', 'string', 'max:255'],
-            'source_url' => ['required', 'url:http,https', 'max:2048'],
+            'source_url' => ['required', 'url:http,https', 'max:2048', new PublicUrl],
             'folder_id' => ['nullable', 'uuid', 'exists:folders,id'],
             'profile_id' => ['required', 'uuid'],
             'tags' => ['nullable', 'array'],
