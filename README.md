@@ -322,7 +322,7 @@ php artisan schedule:work
 
 This runs scheduled tasks — currently the daily `rollups:prune`, which deletes per-minute live viewer rollups older than 30 days (session summaries are kept). In production, prefer a single cron entry instead:
 
-```cron
+```plaintext
 * * * * * cd /path/to/oxygen && php artisan schedule:run >> /dev/null 2>&1
 ```
 
