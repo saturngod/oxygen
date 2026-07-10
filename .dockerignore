@@ -3,6 +3,7 @@ node_modules
 vendor
 public/build
 public/hot
+public/storage
 bootstrap/cache/*.php
 
 # Local frankenphp binary (macOS arm64) — not used in the Linux image
@@ -16,6 +17,7 @@ golang-live/bin
 .env
 .env.*
 !.env.example
+docker/local.env
 
 # VCS / tooling / editor
 .git
@@ -36,6 +38,8 @@ storage/logs/*
 storage/framework/cache/*
 storage/framework/sessions/*
 storage/framework/views/*
+storage/app/public/*
+!storage/app/public/.gitignore
 
 # AI/agent tooling dirs
 .agents

@@ -4,27 +4,19 @@
 # Oxygen — single-image production build for Dokploy
 # Runs in one container via supervisord:
 #   - Laravel Octane (FrankenPHP)   :8000  (HTTP / control plane)
-#   - Laravel queue worker          (webhooks + jobs)
+#   - Laravel queue worker          (queued jobs)
+#   - Laravel webhook consumer      (raw Redis events → queued jobs)
 #   - Laravel scheduler             (daily rollup prune, etc.)
 #   - golang-queue VOD worker       (ffmpeg → HLS → S3)
 #   - golang-live service           :8081 (HTTP/HLS) + :1935 (RTMP ingest)
 #
-# All persistent state lives in external services (Postgres, Redis, S3)
-# provided through environment variables — no rustfs/local object store.
+# Durable application state lives in Postgres, Redis, S3, and the explicitly
+# mounted public-upload/live-callback volumes described below.
 # ─────────────────────────────────────────────────────────────
 
 
-# ── Stage 1: build frontend assets ───────────────────────────
-FROM node:24-bookworm-slim AS assets
-WORKDIR /app
-
-COPY package.json package-lock.json ./
-RUN npm ci
-
-# Vite needs the app sources + (some configs read vendor wayfinder output,
-# which is committed under resources/js), so copy the whole tree.
-COPY . .
-RUN npm run build
+# ── Stage 1: Node runtime donor ───────────────────────────────
+FROM node:24-bookworm-slim AS node-runtime
 
 
 # ── Stage 2: PHP/Composer dependencies ───────────────────────
@@ -41,8 +33,26 @@ RUN composer install \
     --optimize-autoloader
 
 
-# ── Stage 3: build the two Go services ───────────────────────
-FROM golang:1.25-bookworm AS go-build
+# ── Stage 3: build frontend assets with PHP + Wayfinder ───────
+# The Wayfinder Vite plugin runs `php artisan wayfinder:generate` during every
+# build. Use a PHP 8.4 image with Composer dependencies present, then copy the
+# Node runtime into it; a Node-only stage cannot execute the Artisan command.
+FROM dunglas/frankenphp:1-php8.4-bookworm AS assets
+COPY --from=node-runtime /usr/local /usr/local
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY . .
+COPY --from=vendor /app/vendor ./vendor
+RUN mkdir -p bootstrap/cache \
+    && php artisan package:discover --ansi \
+    && npm run build
+
+
+# ── Stage 4: build the two Go services ───────────────────────
+FROM golang:1.25.1-bookworm AS go-build
 WORKDIR /src
 
 # golang-queue (VOD transcode worker)
@@ -58,13 +68,14 @@ COPY golang-live ./golang-live
 RUN cd golang-live && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/oxygen-live ./cmd/live
 
 
-# ── Stage 4: final runtime image ─────────────────────────────
+# ── Stage 5: final runtime image ─────────────────────────────
 FROM dunglas/frankenphp:1-php8.4-bookworm AS runtime
 
 # System deps: ffmpeg (transcode worker), supervisor (process mgr).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         supervisor \
+        passwd \
         ca-certificates \
         curl \
     && rm -rf /var/lib/apt/lists/*
@@ -82,12 +93,15 @@ RUN install-php-extensions \
         opcache \
         redis
 
+RUN groupadd --system oxygen \
+    && useradd --system --gid oxygen --home-dir /app --shell /usr/sbin/nologin oxygen
+
 WORKDIR /app
 
 # Application code (built assets + vendor merged in).
-COPY . .
-COPY --from=vendor /app/vendor ./vendor
-COPY --from=assets /app/public/build ./public/build
+COPY --chown=oxygen:oxygen . .
+COPY --chown=oxygen:oxygen --from=vendor /app/vendor ./vendor
+COPY --chown=oxygen:oxygen --from=assets /app/public/build ./public/build
 
 # Go service binaries.
 COPY --from=go-build /out/oxygen-queue /usr/local/bin/oxygen-queue
@@ -99,24 +113,47 @@ COPY docker/php.ini "$PHP_INI_DIR/conf.d/zz-oxygen.ini"
 # Process supervision + startup.
 COPY docker/supervisord.conf /etc/supervisor/conf.d/oxygen.conf
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+COPY docker/healthcheck.sh /usr/local/bin/healthcheck.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/healthcheck.sh
 
-# Laravel writable dirs (FrankenPHP runs as root by default here, but keep
-# permissions sane for the storage/cache trees).
-RUN mkdir -p storage/framework/{cache,sessions,views} storage/logs bootstrap/cache \
-    && chmod -R 775 storage bootstrap/cache
+# Laravel and Go writable directories. The relative storage symlink remains
+# valid when /app/storage/app/public is mounted as a Dokploy volume.
+ENV WORK_DIR=/tmp/transcoder \
+    LIVE_HLS_ROOT=/var/lib/oxygen-live/hls \
+    LIVE_CALLBACK_ROOT=/var/lib/oxygen-live/callbacks
 
-# Scratch space for the Go transcode worker: per-job source download + HLS
-# renditions (~15GB per 4GB job). Mount a sized volume here in Dokploy
-# (~15GB x WORKER_CONCURRENCY). Cleaned per job, but peak usage is large.
-VOLUME ["/tmp/transcoder"]
+RUN mkdir -p \
+        storage/app/public \
+        storage/framework/cache \
+        storage/framework/sessions \
+        storage/framework/views \
+        storage/logs \
+        bootstrap/cache \
+        /tmp/transcoder \
+        /var/lib/oxygen-live/hls \
+        /var/lib/oxygen-live/callbacks \
+    && rm -rf public/storage \
+    && ln -s ../storage/app/public public/storage \
+    && chown -R oxygen:oxygen \
+        storage bootstrap/cache /tmp/transcoder /var/lib/oxygen-live \
+    && chmod -R ug+rwX storage bootstrap/cache /tmp/transcoder /var/lib/oxygen-live
+
+# Configure named Dokploy volumes for public organization images and the live
+# callback outbox. Transcode scratch is intentionally a separate sized volume
+# (~15GB x WORKER_CONCURRENCY) and is cleaned after each successful job.
+VOLUME ["/app/storage/app/public", "/var/lib/oxygen-live/callbacks", "/tmp/transcoder"]
 
 # Ports: 8000 web/Octane, 8081 live HTTP/HLS, 1935 RTMP ingest.
 EXPOSE 8000 8081 1935
 
-# Catches an Octane/FrankenPHP hang even while the Go services stay up.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8000/up || exit 1
+# Require every supervised process plus Laravel and the live service readiness
+# endpoint. This lets Dokploy reject a release where a background process is
+# crash-looping even though Octane still answers requests.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD ["/usr/local/bin/healthcheck.sh"]
 
+# Dokploy must use one replica with a stop-first update and a StopGracePeriod
+# of at least 86400 seconds so the supervised VOD drain window is honored.
+STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["supervisord", "-c", "/etc/supervisor/conf.d/oxygen.conf", "-n"]

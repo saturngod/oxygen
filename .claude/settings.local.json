@@ -24,7 +24,8 @@
       "Bash(cp public/logo.png docs/assets/logo.png)",
       "Bash(echo \"exit: $?\")",
       "Bash(php -v)",
-      "Bash(go test *)"
+      "Bash(go test *)",
+      "Bash(grep -n \"signature\\\\|protected \\\\$\" app/Console/Commands/ConsumeWebhooksCommand.php)"
     ]
   },
   "enableAllProjectMcpServers": true,

@@ -1,0 +1,90 @@
+name: oxygen
+
+services:
+  oxygen:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    env_file:
+      - docker/local.env
+    ports:
+      - "8000:8000"
+      - "8081:8081"
+      - "1935:1935/tcp"
+    volumes:
+      - public-uploads:/app/storage/app/public
+      - live-callbacks:/var/lib/oxygen-live/callbacks
+      - transcode-work:/tmp/transcoder
+    networks:
+      - oxygen-network
+    depends_on:
+      stream-postgres:
+        condition: service_healthy
+      my-redis:
+        condition: service_healthy
+      rustfs_local:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 24h
+
+  stream-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: oxygen
+      POSTGRES_USER: oxygen
+      POSTGRES_PASSWORD: oxygen-password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - oxygen-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oxygen -d oxygen"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  my-redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "no"]
+    volumes:
+      - redis-data:/data
+    networks:
+      - oxygen-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  rustfs_local:
+    image: rustfs/rustfs:latest
+    command: ["--address", ":9000", "--console-enable", "--access-key", "yVV7tPNuXZ7yik6xqG65", "--secret-key", "8VoqKu7b3RQIaBvH3TkwmBbOeMzOxKlENME2xGsM", "/data"]
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - rustfs-data:/data
+    networks:
+      - oxygen-network
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  public-uploads:
+  live-callbacks:
+  transcode-work:
+  pgdata:
+  redis-data:
+  rustfs-data:
+
+networks:
+  oxygen-network:
+    name: oxygen-network

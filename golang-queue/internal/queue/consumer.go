@@ -101,8 +101,15 @@ func (c *Consumer) Run(ctx context.Context) {
 		}
 
 		raw := res[1]
-		c.handle(ctx, raw)
+		c.handle(claimedJobContext(ctx), raw)
 	}
+}
+
+// claimedJobContext lets shutdown cancel the blocking Redis poll without
+// canceling a job that has already been removed from the queue. The process
+// manager gives claimed jobs time to finish before it force-kills the worker.
+func claimedJobContext(pollContext context.Context) context.Context {
+	return context.WithoutCancel(pollContext)
 }
 
 func (c *Consumer) handle(ctx context.Context, raw string) {
