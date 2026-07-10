@@ -6,9 +6,10 @@ import (
 )
 
 type Tracker struct {
-	mu      sync.Mutex
-	streams map[string]*streamMetrics
-	ttl     time.Duration
+	mu                sync.Mutex
+	streams           map[string]*streamMetrics
+	ttl               time.Duration
+	maxTrackedViewers int
 }
 
 type streamMetrics struct {
@@ -30,10 +31,11 @@ type Snapshot struct {
 	PeakViewers      int
 }
 
-func NewTracker(ttl time.Duration) *Tracker {
+func NewTracker(ttl time.Duration, maxTrackedViewers int) *Tracker {
 	return &Tracker{
-		streams: make(map[string]*streamMetrics),
-		ttl:     ttl,
+		streams:           make(map[string]*streamMetrics),
+		ttl:               ttl,
+		maxTrackedViewers: maxTrackedViewers,
 	}
 }
 
@@ -81,13 +83,21 @@ func (t *Tracker) EndSessionSnapshot(publicID string, now time.Time) Snapshot {
 	return snapshot
 }
 
-func (t *Tracker) Observe(publicID, viewerID, path string, now time.Time) {
+func (t *Tracker) Observe(publicID, viewerID, path string, now time.Time) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	m := t.metrics(publicID)
-	m.Viewers[viewerID] = now
-	m.UniqueViewers[viewerID] = struct{}{}
+	m, ok := t.streams[publicID]
+	if !ok || m.SessionID == "" {
+		return false
+	}
+
+	if _, exists := m.Viewers[viewerID]; exists || len(m.Viewers) < t.maxTrackedViewers {
+		m.Viewers[viewerID] = now
+	}
+	if _, exists := m.UniqueViewers[viewerID]; !exists && len(m.UniqueViewers) < t.maxTrackedViewers {
+		m.UniqueViewers[viewerID] = struct{}{}
+	}
 
 	if isPlaylist(path) {
 		m.PlaylistRequests++
@@ -99,6 +109,8 @@ func (t *Tracker) Observe(publicID, viewerID, path string, now time.Time) {
 	if current > m.PeakViewers {
 		m.PeakViewers = current
 	}
+
+	return true
 }
 
 func (t *Tracker) Snapshots(now time.Time) []Snapshot {

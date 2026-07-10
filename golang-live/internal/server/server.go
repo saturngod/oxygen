@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bluenviron/gohlslib/v2"
@@ -35,9 +36,20 @@ type Server struct {
 	log     *slog.Logger
 	laravel *LaravelClient
 	tracker *Tracker
+	outbox  *CallbackOutbox
 
-	mu      sync.RWMutex
-	streams map[string]*liveSession
+	mu         sync.RWMutex
+	streams    map[string]*liveSession
+	publishers map[string]struct{}
+
+	rtmpMu    sync.Mutex
+	rtmpConns map[net.Conn]struct{}
+	rtmpWG    sync.WaitGroup
+	rtmpSlots chan struct{}
+
+	recovered     atomic.Bool
+	rtmpListening atomic.Bool
+	outboxHealthy atomic.Bool
 }
 
 type liveSession struct {
@@ -90,18 +102,45 @@ func (ls *liveSession) disconnect() {
 }
 
 func New(cfg config.Config, log *slog.Logger) *Server {
-	return &Server{
-		cfg:     cfg,
-		log:     log,
-		laravel: NewLaravelClient(cfg),
-		tracker: NewTracker(cfg.ViewerTTL),
-		streams: make(map[string]*liveSession),
+	if cfg.MaxTrackedViewers <= 0 {
+		cfg.MaxTrackedViewers = 100000
 	}
+	if cfg.MaxRTMPConnections <= 0 {
+		cfg.MaxRTMPConnections = 1000
+	}
+	laravel := NewLaravelClient(cfg)
+
+	return &Server{
+		cfg:        cfg,
+		log:        log,
+		laravel:    laravel,
+		tracker:    NewTracker(cfg.ViewerTTL, cfg.MaxTrackedViewers),
+		outbox:     NewCallbackOutbox(cfg.CallbackRoot, laravel, log),
+		streams:    make(map[string]*liveSession),
+		publishers: make(map[string]struct{}),
+		rtmpConns:  make(map[net.Conn]struct{}),
+		rtmpSlots:  make(chan struct{}, cfg.MaxRTMPConnections),
+	}
+}
+
+func (s *Server) Prepare() error {
+	if err := s.outbox.Prepare(); err != nil {
+		return err
+	}
+
+	s.outboxHealthy.Store(true)
+
+	return nil
+}
+
+func (s *Server) RunCallbacks(ctx context.Context) {
+	s.outbox.Run(ctx)
 }
 
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
+	mux.HandleFunc("GET /readyz", s.ready)
 	mux.HandleFunc("POST /ingest/auth", s.authPublish)
 	mux.HandleFunc("POST /sessions/start", s.sessionStart)
 	mux.HandleFunc("POST /sessions/end", s.sessionEnd)
@@ -126,18 +165,47 @@ func (s *Server) RunRollups(ctx context.Context) {
 	}
 }
 
-func (s *Server) RecoverActiveSessions(ctx context.Context) {
-	err := s.laravel.Post(ctx, "/internal/live/recover-active", map[string]bool{"ok": true}, nil)
-	if err != nil {
-		s.log.Warn("active session recovery failed", "err", err)
-		return
-	}
+func (s *Server) RecoverActiveSessions(ctx context.Context) bool {
+	backoff := time.Second
 
-	s.log.Info("active live sessions recovered")
+	for {
+		err := s.laravel.Post(ctx, "/internal/live/recover-active", map[string]bool{"ok": true}, nil)
+		if err == nil {
+			s.recovered.Store(true)
+			s.log.Info("active live sessions recovered")
+			return true
+		}
+
+		s.log.Warn("active session recovery failed", "err", err, "retry_in", backoff)
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(backoff):
+		}
+
+		if backoff < 30*time.Second {
+			backoff *= 2
+		}
+	}
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
+	ready := s.recovered.Load() && s.rtmpListening.Load() && s.outboxHealthy.Load()
+	status := http.StatusOK
+	if !ready {
+		status = http.StatusServiceUnavailable
+	}
+
+	writeJSON(w, status, map[string]bool{
+		"ok":             ready,
+		"recovered":      s.recovered.Load(),
+		"rtmp_listening": s.rtmpListening.Load(),
+		"outbox_healthy": s.outboxHealthy.Load(),
+	})
 }
 
 func (s *Server) authPublish(w http.ResponseWriter, r *http.Request) {
@@ -348,6 +416,26 @@ func (s *Server) putLiveSession(session *liveSession) bool {
 	return true
 }
 
+func (s *Server) reservePublisher(publicID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.publishers[publicID]; exists {
+		return false
+	}
+
+	s.publishers[publicID] = struct{}{}
+
+	return true
+}
+
+func (s *Server) releasePublisher(publicID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.publishers, publicID)
+}
+
 func (s *Server) removeLiveSession(publicID string, session *liveSession) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -410,7 +498,7 @@ func (s *Server) viewerID(w http.ResponseWriter, r *http.Request) string {
 		return cookie.Value
 	}
 
-	fingerprint := viewerFingerprint(r)
+	fingerprint := viewerFingerprint(r, s.cfg.TrustProxyHeaders)
 	if fingerprint != "" {
 		return fingerprint
 	}
@@ -427,8 +515,11 @@ func (s *Server) viewerID(w http.ResponseWriter, r *http.Request) string {
 	return id
 }
 
-func viewerFingerprint(r *http.Request) string {
-	host := r.Header.Get("X-Forwarded-For")
+func viewerFingerprint(r *http.Request, trustProxyHeaders bool) string {
+	host := ""
+	if trustProxyHeaders {
+		host = r.Header.Get("X-Forwarded-For")
+	}
 	if host == "" {
 		host, _, _ = net.SplitHostPort(r.RemoteAddr)
 	}

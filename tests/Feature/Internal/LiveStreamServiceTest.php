@@ -144,4 +144,126 @@ test('service callbacks track live session and viewer rollups', function () {
         ->and($session->recording_path)->toBe('recordings/session.mp4')
         ->and($session->peak_viewers)->toBe(20)
         ->and($session->unique_viewers)->toBe(33);
+
+    $this->withHeader('X-Live-Service-Token', 'live-token')
+        ->postJson(route('internal.live.viewer-snapshot'), [
+            'public_id' => $liveStream->public_id,
+            'session_id' => $sessionId,
+            'current_viewers' => 99,
+            'unique_viewers_seen' => 99,
+            'playlist_requests' => 999,
+            'segment_requests' => 999,
+        ])
+        ->assertOk();
+
+    expect($session->fresh()->current_viewers)->toBe(0)
+        ->and($session->playlist_requests)->toBe(100);
+});
+
+test('session start callbacks are idempotent by external id', function () {
+    $liveStream = LiveStream::factory()->create();
+    $payload = [
+        'public_id' => $liveStream->public_id,
+        'external_id' => 'go-session-idempotent',
+        'hls_prefix' => 'live/'.$liveStream->public_id,
+    ];
+
+    $firstSessionId = $this->withHeader('X-Live-Service-Token', 'live-token')
+        ->postJson(route('internal.live.session-started'), $payload)
+        ->assertOk()
+        ->json('session_id');
+
+    $secondSessionId = $this->withHeader('X-Live-Service-Token', 'live-token')
+        ->postJson(route('internal.live.session-started'), $payload)
+        ->assertOk()
+        ->json('session_id');
+
+    expect($secondSessionId)->toBe($firstSessionId)
+        ->and($liveStream->sessions()->count())->toBe(1)
+        ->and($liveStream->fresh()->active_session_id)->toBe($firstSessionId);
+});
+
+test('late session start retries return the original completed session', function () {
+    $liveStream = LiveStream::factory()->create();
+    $payload = [
+        'public_id' => $liveStream->public_id,
+        'external_id' => 'go-session-completed',
+    ];
+
+    $sessionId = $this->withHeader('X-Live-Service-Token', 'live-token')
+        ->postJson(route('internal.live.session-started'), $payload)
+        ->assertOk()
+        ->json('session_id');
+
+    $this->withHeader('X-Live-Service-Token', 'live-token')
+        ->postJson(route('internal.live.session-ended'), [
+            'public_id' => $liveStream->public_id,
+            'session_id' => $sessionId,
+        ])
+        ->assertOk();
+
+    $this->withHeader('X-Live-Service-Token', 'live-token')
+        ->postJson(route('internal.live.session-started'), $payload)
+        ->assertOk()
+        ->assertJsonPath('session_id', $sessionId);
+
+    expect($liveStream->sessions()->count())->toBe(1)
+        ->and($liveStream->fresh()->status)->toBe(LiveStreamStatus::Offline)
+        ->and($liveStream->active_session_id)->toBeNull()
+        ->and(LiveStreamSession::query()->findOrFail($sessionId)->status)->toBe(LiveStreamSessionStatus::Ended);
+});
+
+test('session start rejects a different external id while a stream is active', function () {
+    $liveStream = LiveStream::factory()->create();
+
+    $this->withHeader('X-Live-Service-Token', 'live-token')
+        ->postJson(route('internal.live.session-started'), [
+            'public_id' => $liveStream->public_id,
+            'external_id' => 'go-session-first',
+        ])
+        ->assertOk();
+
+    $this->withHeader('X-Live-Service-Token', 'live-token')
+        ->postJson(route('internal.live.session-started'), [
+            'public_id' => $liveStream->public_id,
+            'external_id' => 'go-session-second',
+        ])
+        ->assertConflict();
+
+    expect($liveStream->sessions()->count())->toBe(1);
+});
+
+test('session start requires an external id', function () {
+    $liveStream = LiveStream::factory()->create();
+
+    $this->withHeader('X-Live-Service-Token', 'live-token')
+        ->postJson(route('internal.live.session-started'), [
+            'public_id' => $liveStream->public_id,
+        ])
+        ->assertUnprocessable()
+        ->assertInvalid('external_id');
+});
+
+test('external session ids are unique within each live stream', function () {
+    $firstStream = LiveStream::factory()->create();
+    $secondStream = LiveStream::factory()->create();
+
+    $firstSessionId = $this->withHeader('X-Live-Service-Token', 'live-token')
+        ->postJson(route('internal.live.session-started'), [
+            'public_id' => $firstStream->public_id,
+            'external_id' => 'shared-worker-session-id',
+        ])
+        ->assertOk()
+        ->json('session_id');
+
+    $secondSessionId = $this->withHeader('X-Live-Service-Token', 'live-token')
+        ->postJson(route('internal.live.session-started'), [
+            'public_id' => $secondStream->public_id,
+            'external_id' => 'shared-worker-session-id',
+        ])
+        ->assertOk()
+        ->json('session_id');
+
+    expect($secondSessionId)->not->toBe($firstSessionId)
+        ->and(LiveStreamSession::query()->where('external_id', 'shared-worker-session-id')->count())->toBe(2);
 });

@@ -18,21 +18,23 @@ import (
 	rtmpcodecs "github.com/bluenviron/gortmplib/pkg/codecs"
 )
 
-func (s *Server) RunRTMP(ctx context.Context) {
+func (s *Server) RunRTMP(ctx context.Context) error {
 	if s.cfg.RTMPAddr == "" {
-		return
+		return fmt.Errorf("LIVE_RTMP_ADDR must not be empty")
 	}
 
 	ln, err := net.Listen("tcp", s.cfg.RTMPAddr)
 	if err != nil {
-		s.log.Error("rtmp listener failed", "err", err, "addr", s.cfg.RTMPAddr)
-		return
+		return fmt.Errorf("listen for rtmp on %s: %w", s.cfg.RTMPAddr, err)
 	}
 	defer ln.Close()
+	s.rtmpListening.Store(true)
+	defer s.rtmpListening.Store(false)
 
 	go func() {
 		<-ctx.Done()
 		_ = ln.Close()
+		s.closeRTMPConnections()
 	}()
 
 	s.log.Info("rtmp ingest listening", "addr", s.cfg.RTMPAddr)
@@ -41,24 +43,66 @@ func (s *Server) RunRTMP(ctx context.Context) {
 		conn, err := ln.Accept()
 		if err != nil {
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
-				return
+				return nil
 			}
 
 			s.log.Warn("rtmp accept failed", "err", err)
 			continue
 		}
 
-		go s.handleRTMPConn(conn)
+		select {
+		case s.rtmpSlots <- struct{}{}:
+		default:
+			s.log.Warn("rtmp connection limit reached", "remote_addr", conn.RemoteAddr().String())
+			_ = conn.Close()
+			continue
+		}
+
+		s.rtmpMu.Lock()
+		if ctx.Err() != nil {
+			s.rtmpMu.Unlock()
+			<-s.rtmpSlots
+			_ = conn.Close()
+			continue
+		}
+		s.rtmpConns[conn] = struct{}{}
+		s.rtmpWG.Add(1)
+		s.rtmpMu.Unlock()
+
+		go func() {
+			defer s.rtmpWG.Done()
+			defer func() { <-s.rtmpSlots }()
+			defer func() {
+				s.rtmpMu.Lock()
+				delete(s.rtmpConns, conn)
+				s.rtmpMu.Unlock()
+			}()
+
+			s.handleRTMPConn(ctx, conn)
+		}()
 	}
 }
 
-func (s *Server) handleRTMPConn(conn net.Conn) {
+func (s *Server) WaitForRTMPConnections() {
+	s.rtmpWG.Wait()
+}
+
+func (s *Server) closeRTMPConnections() {
+	s.rtmpMu.Lock()
+	defer s.rtmpMu.Unlock()
+
+	for conn := range s.rtmpConns {
+		_ = conn.Close()
+	}
+}
+
+func (s *Server) handleRTMPConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
 	remoteAddr := conn.RemoteAddr().String()
 	s.log.Info("rtmp connection opened", "remote_addr", remoteAddr)
 
-	if err := s.handleRTMPConnInner(conn); err != nil {
+	if err := s.handleRTMPConnInner(ctx, conn); err != nil {
 		s.log.Warn("rtmp connection closed", "remote_addr", remoteAddr, "err", err)
 		return
 	}
@@ -66,7 +110,7 @@ func (s *Server) handleRTMPConn(conn net.Conn) {
 	s.log.Info("rtmp connection closed", "remote_addr", remoteAddr)
 }
 
-func (s *Server) handleRTMPConnInner(conn net.Conn) error {
+func (s *Server) handleRTMPConnInner(ctx context.Context, conn net.Conn) error {
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 
 	rtmpConn := &gortmplib.ServerConn{RW: conn}
@@ -88,7 +132,7 @@ func (s *Server) handleRTMPConnInner(conn net.Conn) error {
 	}
 
 	var auth AuthPublishResponse
-	if err := s.laravel.Post(context.Background(), "/internal/live/auth-publish", AuthPublishRequest{
+	if err := s.laravel.Post(ctx, "/internal/live/auth-publish", AuthPublishRequest{
 		PublicID:  publicID,
 		StreamKey: streamKey,
 	}, &auth); err != nil {
@@ -99,9 +143,10 @@ func (s *Server) handleRTMPConnInner(conn net.Conn) error {
 		return fmt.Errorf("publish auth rejected")
 	}
 
-	if s.getLiveSession(publicID) != nil {
+	if !s.reservePublisher(publicID) {
 		return fmt.Errorf("stream %s is already active", publicID)
 	}
+	defer s.releasePublisher(publicID)
 
 	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 
@@ -146,7 +191,7 @@ func (s *Server) handleRTMPConnInner(conn net.Conn) error {
 	defer session.close()
 
 	var startResp SessionStartedResponse
-	if err := s.laravel.Post(context.Background(), "/internal/live/session-started", SessionStartedRequest{
+	if err := s.laravel.Post(ctx, "/internal/live/session-started", SessionStartedRequest{
 		PublicID:   publicID,
 		ExternalID: randomHex(16),
 		HLSPrefix:  path.Join("live", publicID),
@@ -156,14 +201,12 @@ func (s *Server) handleRTMPConnInner(conn net.Conn) error {
 
 	session.sessionID = startResp.SessionID
 
-	if !s.putLiveSession(session) {
-		_ = s.laravel.Post(context.Background(), "/internal/live/session-failed", map[string]any{
-			"public_id":     publicID,
-			"session_id":    startResp.SessionID,
-			"error_message": "stream is already active",
-		}, nil)
+	if startResp.SessionID == "" {
+		return fmt.Errorf("session start returned an empty session id")
+	}
 
-		return fmt.Errorf("stream %s is already active", publicID)
+	if !s.putLiveSession(session) {
+		return fmt.Errorf("stream %s registration invariant violated", publicID)
 	}
 	defer s.removeLiveSession(publicID, session)
 
@@ -197,16 +240,24 @@ func (s *Server) endRTMPSession(publicID, sessionID string) {
 		snapshot.SessionID = sessionID
 	}
 
-	err := s.laravel.Post(context.Background(), "/internal/live/session-ended", map[string]any{
+	payload := map[string]any{
 		"public_id":         publicID,
 		"session_id":        snapshot.SessionID,
 		"peak_viewers":      snapshot.PeakViewers,
 		"unique_viewers":    snapshot.UniqueViewers,
 		"playlist_requests": snapshot.PlaylistRequests,
 		"segment_requests":  snapshot.SegmentRequests,
-	}, nil)
-	if err != nil {
-		s.log.Warn("session end callback failed", "err", err, "public_id", publicID)
+	}
+
+	if err := s.outbox.Enqueue("/internal/live/session-ended", payload); err != nil {
+		s.outboxHealthy.Store(false)
+		s.log.Error("session end callback could not be persisted", "err", err, "public_id", publicID)
+
+		fallbackCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if postErr := s.laravel.Post(fallbackCtx, "/internal/live/session-ended", payload, nil); postErr != nil {
+			s.log.Error("session end callback fallback failed", "err", postErr, "public_id", publicID)
+		}
 	}
 }
 

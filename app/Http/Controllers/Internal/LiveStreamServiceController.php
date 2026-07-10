@@ -63,7 +63,7 @@ class LiveStreamServiceController extends Controller
 
         $validated = $request->validate([
             'public_id' => ['required', 'string', 'max:255'],
-            'external_id' => ['nullable', 'string', 'max:255'],
+            'external_id' => ['required', 'string', 'max:255'],
             'hls_url' => ['nullable', 'string', 'max:2048'],
             'hls_prefix' => ['nullable', 'string', 'max:1024'],
         ]);
@@ -78,11 +78,19 @@ class LiveStreamServiceController extends Controller
                 ->lockForUpdate()
                 ->firstOrFail();
 
+            $existingSession = $locked->sessions()
+                ->where('external_id', $validated['external_id'])
+                ->first();
+
+            if ($existingSession instanceof LiveStreamSession) {
+                return $existingSession;
+            }
+
             abort_if($locked->status === LiveStreamStatus::Disabled, 403, 'Live stream is disabled.');
             abort_unless($locked->active_session_id === null, 409, 'Live stream already has an active session.');
 
             $session = $locked->sessions()->create([
-                'external_id' => $validated['external_id'] ?? null,
+                'external_id' => $validated['external_id'],
                 'status' => LiveStreamSessionStatus::Live,
                 'settings_version' => $locked->settings_version,
                 'recording_enabled' => $locked->recording_enabled,
@@ -132,7 +140,7 @@ class LiveStreamServiceController extends Controller
                 'playlist_requests' => max($session->playlist_requests, (int) ($validated['playlist_requests'] ?? 0)),
                 'segment_requests' => max($session->segment_requests, (int) ($validated['segment_requests'] ?? 0)),
                 'current_viewers' => 0,
-                'ended_at' => now(),
+                'ended_at' => $session->ended_at ?? now(),
             ])->save();
 
             $this->closeStreamIfActive($liveStream, $session, LiveStreamStatus::Offline);
@@ -159,7 +167,7 @@ class LiveStreamServiceController extends Controller
                 'status' => LiveStreamSessionStatus::Failed,
                 'error_message' => $validated['error_message'] ?? null,
                 'current_viewers' => 0,
-                'ended_at' => now(),
+                'ended_at' => $session->ended_at ?? now(),
             ])->save();
 
             $this->closeStreamIfActive($liveStream, $session, LiveStreamStatus::Failed);
@@ -227,6 +235,11 @@ class LiveStreamServiceController extends Controller
 
         $liveStream = $this->findStream($validated['public_id']);
         $session = $this->findSession($liveStream, $validated['session_id']);
+
+        if (in_array($session->status, [LiveStreamSessionStatus::Ended, LiveStreamSessionStatus::Failed], true)) {
+            return response()->json(['ok' => true]);
+        }
+
         $minute = isset($validated['minute'])
             ? Carbon::parse($validated['minute'])->startOfMinute()
             : now()->startOfMinute();

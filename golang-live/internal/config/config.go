@@ -12,12 +12,16 @@ type Config struct {
 	Addr                 string
 	RTMPAddr             string
 	HLSRoot              string
+	CallbackRoot         string
 	LaravelURL           string
 	ServiceToken         string
 	ControlToken         string
 	AllowInsecureControl bool
+	TrustProxyHeaders    bool
 	ViewerTTL            time.Duration
 	RollupInterval       time.Duration
+	MaxTrackedViewers    int
+	MaxRTMPConnections   int
 }
 
 func Load() Config {
@@ -28,13 +32,31 @@ func Load() Config {
 		Addr:                 getenv("LIVE_ADDR", ":8081"),
 		RTMPAddr:             getenv("LIVE_RTMP_ADDR", ":1935"),
 		HLSRoot:              getenv("LIVE_HLS_ROOT", "/tmp/oxygen-live/hls"),
+		CallbackRoot:         getenv("LIVE_CALLBACK_ROOT", "/tmp/oxygen-live/callbacks"),
 		LaravelURL:           strings.TrimRight(getenv("LARAVEL_URL", "http://127.0.0.1:8000"), "/"),
 		ServiceToken:         getenv("LIVE_SERVICE_TOKEN", ""),
 		ControlToken:         getenv("LIVE_CONTROL_TOKEN", ""),
 		AllowInsecureControl: boolEnv("LIVE_ALLOW_INSECURE_CONTROL", false),
+		TrustProxyHeaders:    boolEnv("LIVE_TRUST_PROXY_HEADERS", false),
 		ViewerTTL:            secondsEnv("VIEWER_TTL_SECONDS", 45),
 		RollupInterval:       secondsEnv("ROLLUP_INTERVAL_SECONDS", 15),
+		MaxTrackedViewers:    intEnv("MAX_TRACKED_VIEWERS", 100000),
+		MaxRTMPConnections:   intEnv("MAX_RTMP_CONNECTIONS", 1000),
 	}
+}
+
+func intEnv(key string, fallback int) int {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return fallback
+	}
+
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return fallback
+	}
+
+	return n
 }
 
 func boolEnv(key string, fallback bool) bool {
