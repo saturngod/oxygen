@@ -28,7 +28,6 @@ class LiveStreamFactory extends Factory
             'public_id' => $publicId,
             'stream_key' => Str::random(48),
             'status' => LiveStreamStatus::Idle,
-            'recording_enabled' => false,
             'restart_required' => false,
             'settings_version' => 1,
             'active_session_id' => null,

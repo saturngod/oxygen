@@ -19,7 +19,6 @@ class StoreLiveStreamRequest extends FormRequest
     {
         return [
             'title' => ['required', 'string', 'max:255'],
-            'recording_enabled' => ['sometimes', 'boolean'],
         ];
     }
 }

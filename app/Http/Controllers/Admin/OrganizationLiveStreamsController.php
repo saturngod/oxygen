@@ -38,7 +38,6 @@ class OrganizationLiveStreamsController extends Controller
                     'public_id' => $liveStream->public_id,
                     'status' => $liveStream->status->value,
                     'status_label' => $liveStream->status->label(),
-                    'recording_enabled' => $liveStream->recording_enabled,
                     'restart_required' => $liveStream->restart_required,
                     'current_viewers' => $latestSessions->get($liveStream->id)?->current_viewers ?? 0,
                     'peak_viewers' => $latestSessions->get($liveStream->id)?->peak_viewers ?? 0,
@@ -73,7 +72,6 @@ class OrganizationLiveStreamsController extends Controller
             'public_id' => $publicId,
             'stream_key' => $endpoints->generateStreamKey(),
             'status' => LiveStreamStatus::Idle,
-            'recording_enabled' => $request->boolean('recording_enabled'),
             'restart_required' => false,
             'settings_version' => 1,
             'rtmp_url' => $endpoints->rtmpUrl(),
@@ -133,7 +131,6 @@ class OrganizationLiveStreamsController extends Controller
                 'stream_path' => $liveStream->public_id,
                 'status' => $liveStream->status->value,
                 'status_label' => $liveStream->status->label(),
-                'recording_enabled' => $liveStream->recording_enabled,
                 'restart_required' => $liveStream->restart_required,
                 'settings_version' => $liveStream->settings_version,
                 'rtmp_url' => $liveStream->rtmp_url,
@@ -155,23 +152,9 @@ class OrganizationLiveStreamsController extends Controller
         $this->authorize('manage', $organization);
         abort_unless($liveStream->organization_id === $organization->id, 404);
 
-        $recordingEnabled = $request->boolean('recording_enabled');
-        $requiresRestart = $liveStream->recording_enabled !== $recordingEnabled;
-
-        $liveStream->fill([
+        $liveStream->update([
             'title' => $request->string('title'),
-            'recording_enabled' => $recordingEnabled,
         ]);
-
-        if ($requiresRestart) {
-            $liveStream->settings_version++;
-
-            if ($liveStream->isLive()) {
-                $liveStream->restart_required = true;
-            }
-        }
-
-        $liveStream->save();
 
         return to_route('admin.organizations.live-streams.show', [$organization, $liveStream])
             ->with('toast', ['type' => 'success', 'message' => __('Live stream settings updated.')]);
@@ -304,9 +287,7 @@ class OrganizationLiveStreamsController extends Controller
             'id' => $session->id,
             'status' => $session->status->value,
             'settings_version' => $session->settings_version,
-            'recording_enabled' => $session->recording_enabled,
             'hls_url' => $session->hls_url,
-            'recording_path' => $session->recording_path,
             'current_viewers' => $session->current_viewers,
             'peak_viewers' => $session->peak_viewers,
             'unique_viewers' => $session->unique_viewers,

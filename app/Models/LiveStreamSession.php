@@ -16,10 +16,8 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
     'external_id',
     'status',
     'settings_version',
-    'recording_enabled',
     'hls_url',
     'hls_prefix',
-    'recording_path',
     'current_viewers',
     'peak_viewers',
     'unique_viewers',
@@ -42,7 +40,6 @@ class LiveStreamSession extends Model
         return [
             'status' => LiveStreamSessionStatus::class,
             'settings_version' => 'integer',
-            'recording_enabled' => 'boolean',
             'current_viewers' => 'integer',
             'peak_viewers' => 'integer',
             'unique_viewers' => 'integer',

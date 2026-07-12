@@ -80,7 +80,6 @@ test('recover active marks stale live sessions offline', function () {
 test('service callbacks track live session and viewer rollups', function () {
     $liveStream = LiveStream::factory()->create([
         'stream_key' => 'secret-key',
-        'recording_enabled' => true,
         'settings_version' => 5,
     ]);
 
@@ -101,8 +100,7 @@ test('service callbacks track live session and viewer rollups', function () {
 
     $session = LiveStreamSession::query()->findOrFail($sessionId);
     expect($session->status)->toBe(LiveStreamSessionStatus::Live)
-        ->and($session->settings_version)->toBe(5)
-        ->and($session->recording_enabled)->toBeTrue();
+        ->and($session->settings_version)->toBe(5);
 
     $this->withHeader('X-Live-Service-Token', 'live-token')
         ->postJson(route('internal.live.viewer-snapshot'), [
@@ -127,7 +125,6 @@ test('service callbacks track live session and viewer rollups', function () {
         ->postJson(route('internal.live.session-ended'), [
             'public_id' => $liveStream->public_id,
             'session_id' => $sessionId,
-            'recording_path' => 'recordings/session.mp4',
             'peak_viewers' => 20,
             'unique_viewers' => 33,
             'playlist_requests' => 100,
@@ -141,7 +138,6 @@ test('service callbacks track live session and viewer rollups', function () {
     expect($liveStream->status)->toBe(LiveStreamStatus::Offline)
         ->and($liveStream->active_session_id)->toBeNull()
         ->and($session->status)->toBe(LiveStreamSessionStatus::Ended)
-        ->and($session->recording_path)->toBe('recordings/session.mp4')
         ->and($session->peak_viewers)->toBe(20)
         ->and($session->unique_viewers)->toBe(33);
 

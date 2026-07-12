@@ -1,11 +1,9 @@
 import { Form, Head, setLayoutProps } from '@inertiajs/react';
 import { Radio } from 'lucide-react';
-import { useState } from 'react';
 import OrganizationLiveStreamsController from '@/actions/App/Http/Controllers/Admin/OrganizationLiveStreamsController';
 import Heading from '@/components/heading';
 import InputError from '@/components/input-error';
 import { Button } from '@/components/ui/button';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
@@ -21,8 +19,6 @@ type Props = {
 };
 
 export default function CreateLiveStream({ organization }: Props) {
-    const [recordingEnabled, setRecordingEnabled] = useState(false);
-
     setLayoutProps({
         breadcrumbs: [
             {
@@ -70,31 +66,6 @@ export default function CreateLiveStream({ organization }: Props) {
                                     placeholder="Friday broadcast"
                                 />
                                 <InputError message={errors.title} />
-                            </div>
-
-                            <input
-                                type="hidden"
-                                name="recording_enabled"
-                                value={recordingEnabled ? '1' : '0'}
-                            />
-
-                            <div className="flex items-start gap-3 rounded-lg border p-3">
-                                <Checkbox
-                                    id="recording_enabled"
-                                    checked={recordingEnabled}
-                                    onCheckedChange={(checked) =>
-                                        setRecordingEnabled(checked === true)
-                                    }
-                                />
-                                <div className="grid gap-1">
-                                    <Label htmlFor="recording_enabled">
-                                        Record this stream
-                                    </Label>
-                                    <p className="text-xs text-muted-foreground">
-                                        The Go live service will keep a full
-                                        session recording when this is enabled.
-                                    </p>
-                                </div>
                             </div>
 
                             <Button disabled={processing}>Create Stream</Button>

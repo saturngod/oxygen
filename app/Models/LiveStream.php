@@ -18,7 +18,6 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
     'public_id',
     'stream_key',
     'status',
-    'recording_enabled',
     'restart_required',
     'settings_version',
     'active_session_id',
@@ -40,7 +39,6 @@ class LiveStream extends Model
         return [
             'stream_key' => 'encrypted',
             'status' => LiveStreamStatus::class,
-            'recording_enabled' => 'boolean',
             'restart_required' => 'boolean',
             'settings_version' => 'integer',
             'last_started_at' => 'immutable_datetime',

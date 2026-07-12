@@ -114,12 +114,11 @@ type AuthPublishRequest struct {
 type AuthPublishResponse struct {
 	Allowed bool `json:"allowed"`
 	Stream  struct {
-		ID               string `json:"id"`
-		OrganizationID   string `json:"organization_id"`
-		PublicID         string `json:"public_id"`
-		SettingsVersion  int    `json:"settings_version"`
-		RecordingEnabled bool   `json:"recording_enabled"`
-		HLSURL           string `json:"hls_url"`
+		ID              string `json:"id"`
+		OrganizationID  string `json:"organization_id"`
+		PublicID        string `json:"public_id"`
+		SettingsVersion int    `json:"settings_version"`
+		HLSURL          string `json:"hls_url"`
 	} `json:"stream"`
 }
 

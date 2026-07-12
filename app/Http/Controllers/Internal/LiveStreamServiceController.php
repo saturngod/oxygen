@@ -51,7 +51,6 @@ class LiveStreamServiceController extends Controller
                 'organization_id' => $liveStream->organization_id,
                 'public_id' => $liveStream->public_id,
                 'settings_version' => $liveStream->settings_version,
-                'recording_enabled' => $liveStream->recording_enabled,
                 'hls_url' => $liveStream->hls_url,
             ],
         ]);
@@ -93,7 +92,6 @@ class LiveStreamServiceController extends Controller
                 'external_id' => $validated['external_id'],
                 'status' => LiveStreamSessionStatus::Live,
                 'settings_version' => $locked->settings_version,
-                'recording_enabled' => $locked->recording_enabled,
                 'hls_url' => $validated['hls_url'] ?? $locked->hls_url,
                 'hls_prefix' => $validated['hls_prefix'] ?? null,
                 'started_at' => now(),
@@ -121,7 +119,6 @@ class LiveStreamServiceController extends Controller
         $validated = $request->validate([
             'public_id' => ['required', 'string', 'max:255'],
             'session_id' => ['required', 'uuid'],
-            'recording_path' => ['nullable', 'string', 'max:2048'],
             'peak_viewers' => ['nullable', 'integer', 'min:0'],
             'unique_viewers' => ['nullable', 'integer', 'min:0'],
             'playlist_requests' => ['nullable', 'integer', 'min:0'],
@@ -134,7 +131,6 @@ class LiveStreamServiceController extends Controller
         DB::transaction(function () use ($liveStream, $session, $validated): void {
             $session->forceFill([
                 'status' => LiveStreamSessionStatus::Ended,
-                'recording_path' => $validated['recording_path'] ?? $session->recording_path,
                 'peak_viewers' => max($session->peak_viewers, (int) ($validated['peak_viewers'] ?? 0)),
                 'unique_viewers' => max($session->unique_viewers, (int) ($validated['unique_viewers'] ?? 0)),
                 'playlist_requests' => max($session->playlist_requests, (int) ($validated['playlist_requests'] ?? 0)),

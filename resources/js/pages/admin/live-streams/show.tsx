@@ -18,7 +18,6 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
@@ -70,9 +69,7 @@ type StreamSession = {
     id: string;
     status: string;
     settings_version: number;
-    recording_enabled: boolean;
     hls_url: string | null;
-    recording_path: string | null;
     current_viewers: number;
     peak_viewers: number;
     unique_viewers: number;
@@ -99,7 +96,6 @@ type LiveStream = {
     stream_path: string;
     status: LiveStreamStatus;
     status_label: string;
-    recording_enabled: boolean;
     restart_required: boolean;
     settings_version: number;
     rtmp_url: string;
@@ -335,10 +331,6 @@ function ViewerChart({ rollups }: { rollups: ViewerRollup[] }) {
 }
 
 export default function ShowLiveStream({ organization, liveStream }: Props) {
-    const [recordingEnabled, setRecordingEnabled] = useState(
-        liveStream.recording_enabled,
-    );
-
     usePoll(
         5000,
         {
@@ -417,9 +409,6 @@ export default function ShowLiveStream({ organization, liveStream }: Props) {
                         <Badge className={statusClasses[liveStream.status]}>
                             {liveStream.status_label}
                         </Badge>
-                        {liveStream.recording_enabled && (
-                            <Badge variant="secondary">Recording on</Badge>
-                        )}
                         {liveStream.restart_required && (
                             <Badge
                                 variant="outline"
@@ -554,36 +543,6 @@ export default function ShowLiveStream({ organization, liveStream }: Props) {
                                                 />
                                             </div>
 
-                                            <input
-                                                type="hidden"
-                                                name="recording_enabled"
-                                                value={
-                                                    recordingEnabled ? '1' : '0'
-                                                }
-                                            />
-                                            <div className="flex items-start gap-3 rounded-lg border p-3">
-                                                <Checkbox
-                                                    id="recording_enabled"
-                                                    checked={recordingEnabled}
-                                                    onCheckedChange={(
-                                                        checked,
-                                                    ) =>
-                                                        setRecordingEnabled(
-                                                            checked === true,
-                                                        )
-                                                    }
-                                                />
-                                                <div className="grid gap-1">
-                                                    <Label htmlFor="recording_enabled">
-                                                        Record this stream
-                                                    </Label>
-                                                    <p className="text-xs text-muted-foreground">
-                                                        Changing this while live
-                                                        requires a restart.
-                                                    </p>
-                                                </div>
-                                            </div>
-
                                             <Button disabled={processing}>
                                                 Save settings
                                             </Button>
@@ -670,10 +629,8 @@ export default function ShowLiveStream({ organization, liveStream }: Props) {
                                 <TableHead>Started</TableHead>
                                 <TableHead>Ended</TableHead>
                                 <TableHead>Status</TableHead>
-                                <TableHead>Recording</TableHead>
                                 <TableHead>Peak</TableHead>
                                 <TableHead>Unique</TableHead>
-                                <TableHead>Recording path</TableHead>
                             </TableRow>
                         </TableHeader>
                         <TableBody>
@@ -690,21 +647,15 @@ export default function ShowLiveStream({ organization, liveStream }: Props) {
                                             {item.status}
                                         </Badge>
                                     </TableCell>
-                                    <TableCell>
-                                        {item.recording_enabled ? 'On' : 'Off'}
-                                    </TableCell>
                                     <TableCell>{item.peak_viewers}</TableCell>
                                     <TableCell>{item.unique_viewers}</TableCell>
-                                    <TableCell className="max-w-xs truncate font-mono text-xs text-muted-foreground">
-                                        {item.recording_path ?? '-'}
-                                    </TableCell>
                                 </TableRow>
                             ))}
 
                             {liveStream.recent_sessions.length === 0 && (
                                 <TableRow>
                                     <TableCell
-                                        colSpan={7}
+                                        colSpan={5}
                                         className="h-24 text-center text-muted-foreground"
                                     >
                                         No sessions yet.

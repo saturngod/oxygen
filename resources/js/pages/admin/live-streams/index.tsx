@@ -39,7 +39,6 @@ type LiveStream = {
     public_id: string;
     status: LiveStreamStatus;
     status_label: string;
-    recording_enabled: boolean;
     restart_required: boolean;
     current_viewers: number;
     peak_viewers: number;
@@ -123,7 +122,6 @@ export default function LiveStreamsIndex({ organization, liveStreams }: Props) {
                             <TableRow>
                                 <TableHead>Stream</TableHead>
                                 <TableHead>Status</TableHead>
-                                <TableHead>Recording</TableHead>
                                 <TableHead>Viewers</TableHead>
                                 <TableHead>Last live</TableHead>
                                 <TableHead>Created</TableHead>
@@ -173,17 +171,6 @@ export default function LiveStreamsIndex({ organization, liveStreams }: Props) {
                                                 </Badge>
                                             )}
                                         </div>
-                                    </TableCell>
-                                    <TableCell>
-                                        {stream.recording_enabled ? (
-                                            <Badge variant="secondary">
-                                                On
-                                            </Badge>
-                                        ) : (
-                                            <span className="text-xs text-muted-foreground">
-                                                Off
-                                            </span>
-                                        )}
                                     </TableCell>
                                     <TableCell>
                                         <div className="flex items-center gap-1.5 text-sm">

@@ -31,14 +31,12 @@ test('admin can create and view a live stream with encrypted stream key', functi
     $this->actingAs($user)
         ->post(route('admin.organizations.live-streams.store', $organization), [
             'title' => 'Launch Stream',
-            'recording_enabled' => '1',
         ])
         ->assertRedirect();
 
     $liveStream = LiveStream::query()->where('organization_id', $organization->id)->sole();
 
     expect($liveStream->title)->toBe('Launch Stream')
-        ->and($liveStream->recording_enabled)->toBeTrue()
         ->and($liveStream->rtmp_url)->toBe('rtmp://127.0.0.1:1935/live')
         ->and($liveStream->hls_url)->toContain($liveStream->public_id);
 
@@ -106,28 +104,26 @@ test('admin can list live streams with latest session stats', function () {
         );
 });
 
-test('recording changes on a live stream require restart', function () {
+test('admin can update a live stream title without requiring restart', function () {
     [$user, $organization] = liveStreamAdmin();
     $liveStream = LiveStream::factory()
         ->for($organization)
         ->live()
         ->create([
-            'recording_enabled' => false,
             'settings_version' => 3,
         ]);
 
     $this->actingAs($user)
         ->put(route('admin.organizations.live-streams.update', [$organization, $liveStream]), [
-            'title' => $liveStream->title,
-            'recording_enabled' => '1',
+            'title' => 'Updated title',
         ])
         ->assertRedirect(route('admin.organizations.live-streams.show', [$organization, $liveStream]));
 
     $liveStream->refresh();
 
-    expect($liveStream->recording_enabled)->toBeTrue()
-        ->and($liveStream->restart_required)->toBeTrue()
-        ->and($liveStream->settings_version)->toBe(4);
+    expect($liveStream->title)->toBe('Updated title')
+        ->and($liveStream->restart_required)->toBeFalse()
+        ->and($liveStream->settings_version)->toBe(3);
 });
 
 test('rotating a live stream key requires restart', function () {
