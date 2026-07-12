@@ -7,7 +7,17 @@ services:
       dockerfile: Dockerfile
       target: runtime
     env_file:
-      - docker/local.env
+      - path: docker/local.env
+        required: false
+    environment:
+      FILESYSTEM_DISK: ${FILESYSTEM_DISK:-s3}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?Set AWS_ACCESS_KEY_ID for the external S3 service}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?Set AWS_SECRET_ACCESS_KEY for the external S3 service}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      AWS_BUCKET: ${AWS_BUCKET:?Set AWS_BUCKET to an existing external bucket}
+      AWS_ENDPOINT: ${AWS_ENDPOINT:-}
+      AWS_URL: ${AWS_URL:-}
+      AWS_USE_PATH_STYLE_ENDPOINT: ${AWS_USE_PATH_STYLE_ENDPOINT:-false}
     ports:
       - "8000:8000"
       - "8081:8081"
@@ -22,8 +32,6 @@ services:
       stream-postgres:
         condition: service_healthy
       my-redis:
-        condition: service_healthy
-      rustfs_local:
         condition: service_healthy
     restart: unless-stopped
     stop_grace_period: 24h
@@ -59,31 +67,12 @@ services:
       retries: 10
     restart: unless-stopped
 
-  rustfs_local:
-    image: rustfs/rustfs:latest
-    command: ["--address", ":9000", "--console-enable", "--access-key", "yVV7tPNuXZ7yik6xqG65", "--secret-key", "8VoqKu7b3RQIaBvH3TkwmBbOeMzOxKlENME2xGsM", "/data"]
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    volumes:
-      - rustfs-data:/data
-    networks:
-      - oxygen-network
-    healthcheck:
-      test: ["CMD-SHELL", "wget -S -O /dev/null http://127.0.0.1:9000/ 2>&1 | grep -q 'HTTP/'"]
-      interval: 5s
-      timeout: 3s
-      retries: 15
-      start_period: 10s
-    restart: unless-stopped
-
 volumes:
   public-uploads:
   live-callbacks:
   transcode-work:
   pgdata:
   redis-data:
-  rustfs-data:
 
 networks:
   oxygen-network:

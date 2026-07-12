@@ -34,6 +34,23 @@ if [ -z "${APP_KEY:-}" ]; then
     exit 1
 fi
 
+# config:cache would otherwise persist an incomplete S3 configuration and let
+# the container start successfully only to fail when the first upload begins.
+if [ "${FILESYSTEM_DISK:-local}" = "s3" ]; then
+    missing_s3_variables=()
+
+    for variable_name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION AWS_BUCKET; do
+        if [ -z "${!variable_name:-}" ]; then
+            missing_s3_variables+=("${variable_name}")
+        fi
+    done
+
+    if [ "${#missing_s3_variables[@]}" -gt 0 ]; then
+        echo "[entrypoint] FATAL: FILESYSTEM_DISK=s3 requires: ${missing_s3_variables[*]}" >&2
+        exit 1
+    fi
+fi
+
 # Composer ran with --no-scripts, so build the package manifest before running
 # any other Artisan command.
 php artisan package:discover --ansi
