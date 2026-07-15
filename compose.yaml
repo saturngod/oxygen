@@ -8,16 +8,7 @@ services:
       target: runtime
     env_file:
       - path: docker/local.env
-        required: false
-    environment:
-      FILESYSTEM_DISK: ${FILESYSTEM_DISK:-s3}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?Set AWS_ACCESS_KEY_ID for the external S3 service}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?Set AWS_SECRET_ACCESS_KEY for the external S3 service}
-      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
-      AWS_BUCKET: ${AWS_BUCKET:?Set AWS_BUCKET to an existing external bucket}
-      AWS_ENDPOINT: ${AWS_ENDPOINT:-}
-      AWS_URL: ${AWS_URL:-}
-      AWS_USE_PATH_STYLE_ENDPOINT: ${AWS_USE_PATH_STYLE_ENDPOINT:-false}
+        required: true
     ports:
       - "8000:8000"
       - "8081:8081"

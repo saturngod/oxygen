@@ -7,7 +7,7 @@ import {
     Loader2,
     Video,
 } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Heading from '@/components/heading';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -20,6 +20,8 @@ import {
     DialogHeader,
     DialogTitle,
 } from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import {
     Table,
     TableBody,
@@ -28,6 +30,39 @@ import {
     TableHeader,
     TableRow,
 } from '@/components/ui/table';
+
+type HlsErrorData = {
+    details?: string;
+    fatal?: boolean;
+};
+
+type HlsInstance = {
+    attachMedia: (media: HTMLMediaElement) => void;
+    destroy: () => void;
+    loadSource: (src: string) => void;
+    on: (
+        event: string,
+        callback: (event: string, data: HlsErrorData) => void,
+    ) => void;
+};
+
+type HlsConstructor = {
+    Events: {
+        ERROR: string;
+        MANIFEST_PARSED: string;
+    };
+    isSupported: () => boolean;
+    new (config?: Record<string, unknown>): HlsInstance;
+};
+
+declare global {
+    interface Window {
+        Hls?: HlsConstructor;
+    }
+}
+
+const HLS_SCRIPT_SRC =
+    'https://cdn.jsdelivr.net/npm/hls.js@1.6.16/dist/hls.min.js';
 
 type FileStatus = 'uploaded' | 'progress' | 'success' | 'failed';
 
@@ -131,6 +166,166 @@ function ProgressCell({ file }: { file: FileItem }) {
     }
 
     return <span className="text-xs text-muted-foreground">—</span>;
+}
+
+function loadHlsScript(): Promise<void> {
+    if (window.Hls) {
+        return Promise.resolve();
+    }
+
+    return new Promise((resolve, reject) => {
+        const existing = document.querySelector<HTMLScriptElement>(
+            `script[src="${HLS_SCRIPT_SRC}"]`,
+        );
+        const script = existing ?? document.createElement('script');
+
+        script.addEventListener('load', () => resolve(), { once: true });
+        script.addEventListener(
+            'error',
+            () => reject(new Error('Unable to load the HLS player.')),
+            { once: true },
+        );
+
+        if (!existing) {
+            script.src = HLS_SCRIPT_SRC;
+            script.async = true;
+            document.head.appendChild(script);
+        }
+    });
+}
+
+function HlsPlayer({ src }: { src: string }) {
+    const videoRef = useRef<HTMLVideoElement | null>(null);
+    const [error, setError] = useState<string | null>(null);
+
+    useEffect(() => {
+        const video = videoRef.current;
+        let cancelled = false;
+        let hls: HlsInstance | null = null;
+
+        if (!video || !src) {
+            return;
+        }
+
+        setError(null);
+
+        const handleVideoError = () => {
+            setError(
+                'Playback failed. Check that the signed URL is valid and the HLS files allow cross-origin requests.',
+            );
+        };
+
+        video.addEventListener('error', handleVideoError);
+
+        if (video.canPlayType('application/vnd.apple.mpegurl')) {
+            video.src = src;
+            video.load();
+
+            return () => {
+                video.removeEventListener('error', handleVideoError);
+                video.removeAttribute('src');
+                video.load();
+            };
+        }
+
+        const attachHls = async () => {
+            await loadHlsScript();
+
+            if (cancelled || !window.Hls?.isSupported()) {
+                if (!cancelled) {
+                    setError('HLS playback is not supported in this browser.');
+                }
+
+                return;
+            }
+
+            hls = new window.Hls();
+            hls.on(window.Hls.Events.ERROR, (_event, data) => {
+                if (data.fatal) {
+                    setError(
+                        data.details
+                            ? `Playback failed: ${data.details}`
+                            : 'Playback failed while loading the HLS stream.',
+                    );
+                }
+            });
+            hls.loadSource(src);
+            hls.attachMedia(video);
+        };
+
+        void attachHls().catch((reason: unknown) => {
+            if (!cancelled) {
+                setError(
+                    reason instanceof Error
+                        ? reason.message
+                        : 'Unable to initialize HLS playback.',
+                );
+            }
+        });
+
+        return () => {
+            cancelled = true;
+            video.removeEventListener('error', handleVideoError);
+            hls?.destroy();
+        };
+    }, [src]);
+
+    return (
+        <div className="space-y-2">
+            <div className="aspect-video overflow-hidden rounded-lg border bg-black">
+                <video
+                    ref={videoRef}
+                    controls
+                    playsInline
+                    className="h-full w-full"
+                />
+            </div>
+            {error && (
+                <p className="text-xs text-destructive" role="alert">
+                    {error}
+                </p>
+            )}
+        </div>
+    );
+}
+
+function PlaybackTester({ defaultUrl }: { defaultUrl: string }) {
+    const [url, setUrl] = useState(defaultUrl);
+    const [playerUrl, setPlayerUrl] = useState(defaultUrl);
+
+    const loadStream = (event: React.FormEvent<HTMLFormElement>) => {
+        event.preventDefault();
+        setPlayerUrl(url.trim());
+    };
+
+    return (
+        <div className="space-y-3 rounded-lg border bg-muted/20 p-3">
+            <div className="space-y-1">
+                <h3 className="text-sm font-medium">Test HLS playback</h3>
+                <p className="text-xs text-muted-foreground">
+                    Use the default stream URL or paste a complete signed .m3u8
+                    URL.
+                </p>
+            </div>
+            <form className="flex gap-2" onSubmit={loadStream}>
+                <div className="min-w-0 flex-1 space-y-1.5">
+                    <Label htmlFor="hls-playback-url">Playback URL</Label>
+                    <Input
+                        id="hls-playback-url"
+                        type="url"
+                        value={url}
+                        onChange={(event) => setUrl(event.target.value)}
+                        placeholder="https://example.com/master.m3u8?signature=..."
+                        required
+                    />
+                </div>
+                <Button type="submit" className="self-end">
+                    Load stream
+                </Button>
+            </form>
+            {playerUrl && <HlsPlayer src={playerUrl} />}
+        </div>
+    );
 }
 
 export default function Status({ files }: Props) {
@@ -281,7 +476,7 @@ export default function Status({ files }: Props) {
                     }
                 }}
             >
-                <DialogContent className="sm:max-w-lg">
+                <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
                     <DialogHeader>
                         <DialogTitle>
                             {fileDetails?.title ?? 'Media'}
@@ -295,6 +490,13 @@ export default function Status({ files }: Props) {
 
                     {fileDetails && (
                         <div className="space-y-4">
+                            {fileDetails.streaming_url && (
+                                <PlaybackTester
+                                    key={fileDetails.id}
+                                    defaultUrl={fileDetails.streaming_url}
+                                />
+                            )}
+
                             <div className="grid grid-cols-[8rem_1fr] gap-x-4 gap-y-2">
                                 <span className="text-xs text-muted-foreground">
                                     Status

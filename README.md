@@ -135,6 +135,139 @@ graph TB
 
 For local development you run all of these on one machine; see the next section. The split above is the **production** topology.
 
+## Local Docker S3 Setup with RustFS
+
+Set up RustFS **before** starting Oxygen with Docker Compose. Oxygen sends multipart uploads directly from the browser to S3, so the hostname in each presigned URL must resolve from both the browser and the `oxygen` container. A Docker-only hostname such as `rustfs` or `rustfs_local` will not resolve in the browser, while `localhost` inside the Oxygen container points back to Oxygen itself.
+
+### 1. Create the shared Docker network and hostname
+
+The supplied `compose.yaml` uses the external `oxygen-network`. Check whether it already exists:
+
+```bash
+docker network inspect oxygen-network
+```
+
+If Docker reports that the network does not exist, create it:
+
+```bash
+docker network create oxygen-network
+```
+
+Add this entry to the host machine's `/etc/hosts` file:
+
+```text
+127.0.0.1 s3.oxygen.test
+```
+
+The browser will resolve `s3.oxygen.test` to the published RustFS port on the host. Docker will resolve the same hostname through the network alias configured in the next step.
+
+### 2. Start RustFS
+
+Choose a local access key and secret key, then start RustFS on the shared network. Keep these credentials available for `docker/local.env`.
+
+```bash
+docker volume create oxygen-rustfs-data
+
+docker run -d \
+  --name rustfs \
+  --network oxygen-network \
+  --network-alias s3.oxygen.test \
+  -p 9000:9000 \
+  -p 9001:9001 \
+  -v oxygen-rustfs-data:/data \
+  -e RUSTFS_ACCESS_KEY="<your-local-access-key>" \
+  -e RUSTFS_SECRET_KEY="<your-local-secret-key>" \
+  -e RUSTFS_VOLUMES=/data \
+  -e RUSTFS_CORS_ALLOWED_ORIGINS="*" \
+  -e RUSTFS_CONSOLE_CORS_ALLOWED_ORIGINS="*" \
+  rustfs/rustfs:latest
+```
+
+The wildcard CORS values are intended for local development only. Restrict allowed origins in any shared or production environment.
+
+- S3 API: `http://s3.oxygen.test:9000`
+- RustFS console: `http://localhost:9001`
+
+If RustFS is already running as a standalone container, connect it without recreating it:
+
+```bash
+docker network connect \
+  --alias s3.oxygen.test \
+  oxygen-network \
+  rustfs
+```
+
+The manual network connection survives restarts, but it must be repeated if the RustFS container is deleted and recreated.
+
+### 3. Create the buckets and configure CORS
+
+Open the RustFS console, sign in with the access key and secret key selected above, and create:
+
+- `oxygen-source` for original browser uploads
+- `oxygen-streaming` for transcoded HLS output
+
+The source bucket must allow browser requests from `http://localhost:8000`. Its S3 CORS policy must allow `PUT`, `GET`, `POST`, and `HEAD`, allow request headers, and expose the `ETag` response header. Oxygen needs `ETag` to complete multipart uploads.
+
+```json
+[
+    {
+        "AllowedOrigins": ["http://localhost:8000"],
+        "AllowedMethods": ["GET", "PUT", "POST", "HEAD"],
+        "AllowedHeaders": ["*"],
+        "ExposeHeaders": ["ETag"]
+    }
+]
+```
+
+If the dashboard is opened through another origin, such as `http://127.0.0.1:8000`, add that exact origin as well.
+
+### 4. Configure `docker/local.env`
+
+Create the local Docker environment file if it does not exist:
+
+```bash
+cp docker/local.env.example docker/local.env
+```
+
+Set the credentials chosen for RustFS and use the shared hostname for every S3 endpoint:
+
+```dotenv
+FILESYSTEM_DISK=s3
+AWS_ACCESS_KEY_ID=<your-local-access-key>
+AWS_SECRET_ACCESS_KEY=<your-local-secret-key>
+AWS_DEFAULT_REGION=us-east-1
+AWS_BUCKET=oxygen-source
+AWS_ENDPOINT=http://s3.oxygen.test:9000
+AWS_URL=http://s3.oxygen.test:9000/oxygen-source
+AWS_USE_PATH_STYLE_ENDPOINT=true
+
+SOURCE_AWS_BUCKET=oxygen-source
+SOURCE_AWS_ENDPOINT=http://s3.oxygen.test:9000
+SOURCE_AWS_URL=http://s3.oxygen.test:9000/oxygen-source
+SOURCE_AWS_USE_PATH_STYLE_ENDPOINT=true
+
+STREAMING_AWS_BUCKET=oxygen-streaming
+STREAMING_AWS_ENDPOINT=http://s3.oxygen.test:9000
+STREAMING_AWS_URL=http://s3.oxygen.test:9000/oxygen-streaming
+STREAMING_AWS_USE_PATH_STYLE_ENDPOINT=true
+STREAMING_AWS_DEFAULT_REGION=us-east-1
+```
+
+`AWS_ENDPOINT` is part of the presigned multipart URL and its signature. Do not use `host.docker.internal`, `rustfs`, or `localhost` here; `s3.oxygen.test` is deliberately reachable under the same hostname from both Docker and the browser.
+
+After RustFS and `docker/local.env` are ready, start Oxygen:
+
+```bash
+docker compose up -d --build
+```
+
+Verify that the Oxygen container can resolve and reach RustFS:
+
+```bash
+docker compose exec oxygen getent hosts s3.oxygen.test
+docker compose exec oxygen curl --fail http://s3.oxygen.test:9000/health/ready
+```
+
 ## Running Locally — Step by Step
 
 Oxygen is **not a single process**. A full local stack runs the Laravel web app plus several long-running workers and two standalone Go services. This section walks through every piece.
@@ -163,47 +296,7 @@ Install these first:
 - **FFmpeg** (`ffmpeg` + `ffprobe` on `PATH`) — required by the transcode worker
 - **PostgreSQL** — shared by Laravel and both Go services
 - **Redis** — job + webhook queues
-- **S3** — an AWS bucket, or an S3-compatible server locally such as [RustFS](https://docs.rustfs.com/installation/docker/) or MinIO (separate source + streaming buckets recommended; see [Local S3 with RustFS](#local-s3-with-rustfs))
-
-### Local S3 with RustFS
-
-For local development you don't need a real AWS account. [RustFS](https://docs.rustfs.com/installation/docker/) is an S3-compatible server you can run in Docker. (MinIO works the same way if you prefer it.)
-
-Start RustFS:
-
-```bash
-docker run -d \
-  --name rustfs_local \
-  -p 9000:9000 \
-  -p 9001:9001 \
-  -v /mnt/rustfs/data:/data \
-  -e RUSTFS_ACCESS_KEY=rustfsadmin \
-  -e RUSTFS_SECRET_KEY=rustfsadmin \
-  -e RUSTFS_CONSOLE_ENABLE=true \
-  rustfs/rustfs:latest \
-  /data
-```
-
-- S3 API endpoint: `http://localhost:9000`
-- Web console: `http://localhost:9001`
-- Default credentials: access key `rustfsadmin`, secret key `rustfsadmin`
-
-> The data volume must be writable by user id `10001`: `sudo chown -R 10001:10001 /mnt/rustfs/data`.
-
-Open the console at `http://localhost:9001`, log in, and create two buckets: `oxygen-source` and `oxygen-streaming`.
-
-Then point the Laravel `.env` (and the Go services) at it. The key extra settings for an S3-compatible endpoint are the endpoint URL and **path-style** addressing:
-
-```dotenv
-AWS_ACCESS_KEY_ID=rustfsadmin
-AWS_SECRET_ACCESS_KEY=rustfsadmin
-AWS_DEFAULT_REGION=us-east-1
-AWS_BUCKET=oxygen-source
-AWS_ENDPOINT=http://localhost:9000
-AWS_USE_PATH_STYLE_ENDPOINT=true
-```
-
-The Go worker uses the same endpoint via its `SOURCE_AWS_*` / `STREAMING_AWS_*` values (set the matching endpoint/path-style options in `golang-queue/.env`).
+- **S3** — an AWS bucket, or an S3-compatible server locally such as [RustFS](https://docs.rustfs.com/installation/docker/) or MinIO (separate source + streaming buckets recommended; see [Local Docker S3 Setup with RustFS](#local-docker-s3-setup-with-rustfs))
 
 ### Step 1 — Configure and set up the Laravel app
 
