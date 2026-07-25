@@ -16,9 +16,16 @@ The Laravel app is the control plane (uploads, management, auth, session/viewer 
 ```bash
 composer run setup          # first-time: install, migrate, build
 composer run dev            # concurrently runs: php serve, queue:listen, pail, vite dev
+composer run dev:octane     # same, but octane:start --watch instead of php serve
 ```
 
+`composer run dev` does NOT start the webhook consumer, the scheduler, or either Go service. Start those separately when the feature under test needs them (see Background Processes).
+
 If frontend changes aren't visible, the user likely needs `npm run build` or `composer run dev`.
+
+Full local setup (Postgres/Redis/S3/env wiring) is in `README.md`; bare-metal Ubuntu production setup is in `Setup.md`. Static docs site: `docs/*.html`. Product specs live in `PRD/active/` and `PRD/backlog/`.
+
+`AGENTS.md` is a symlink to this file. `GEMINI.md` is a separate, older copy — do not treat it as authoritative.
 
 ## Verification Pipeline
 
@@ -146,6 +153,38 @@ Standalone Go binary (not part of PHP runtime). Talks to shared Postgres + Redis
 - Run: `go run ./cmd/worker` | Build: `go build -o bin/worker ./cmd/worker` | Test: `go test ./...`
 
 See `golang-queue/PLAN.md` for full system design, `golang-queue/CLAUDE.md` for Go-specific conventions. `golang-live/` has its own `README.md` and uses `gohlslib/v2` (HLS muxing) + `gortmplib` (RTMP ingest).
+
+## Background Processes (Beyond `queue:listen`)
+
+A working system runs **six** long-lived processes. `composer run dev` starts only the first two.
+
+| Process | Command | Purpose |
+| --- | --- | --- |
+| HTTP | `php artisan octane:start` (or `serve`) | Control plane |
+| Queue worker | `php artisan queue:listen` | Laravel jobs (incl. `SendWebhookJob`) |
+| Webhook consumer | `php artisan webhooks:consume` | BRPOPs raw Go events → dispatches jobs |
+| Scheduler | `php artisan schedule:work` | `rollups:prune` daily (`routes/console.php`) |
+| VOD worker | `go run ./cmd/worker` in `golang-queue/` | ffmpeg → HLS → S3 |
+| Live service | `go run ./cmd/live` in `golang-live/` | RTMP :1935 + HLS :8081 |
+
+### Webhook delivery pipeline
+
+Go worker → Redis list (`services.transcode.webhook_queue_key`, default `queues:transcode:webhooks`) → `ConsumeWebhooksCommand` (infinite BRPOP loop) → fans out one `SendWebhookJob` per matching `Webhook` row → Laravel queue delivers it. Go never calls customer webhook URLs directly. Add a new event by extending `App\Enums\WebhookEvent` and having the producer push the same payload shape (`organization_id` + `event` are required or the consumer drops it).
+
+## Docker (Single-Image Deployment)
+
+`Dockerfile` builds ONE image running all six processes under supervisord (`docker/supervisord.conf`: `octane`, `queue`, `webhooks`, `scheduler`, `go-queue`, `go-live`). Ports: 8000 HTTP, 8081 live HLS, 1935 RTMP.
+
+```bash
+docker network create oxygen-network   # compose.yaml expects this external network
+cp docker/local.env.example docker/local.env
+docker compose up --build
+```
+
+- Env for the container comes from `docker/local.env` (a single file for Laravel *and* both Go services) — **not** from the repo `.env`.
+- `compose.yaml` provides Postgres + Redis only. S3 is external (there is no bundled MinIO/RustFS service); see "Local Docker S3 Setup" in `README.md`.
+- `RUN_MIGRATIONS=true` makes `docker/entrypoint.sh` migrate on boot.
+- Adding a background process means editing `docker/supervisord.conf` too, or it silently won't run in production.
 
 ## Frontend Conventions
 

@@ -25,7 +25,8 @@
       "Bash(echo \"exit: $?\")",
       "Bash(php -v)",
       "Bash(go test *)",
-      "Bash(grep -n \"signature\\\\|protected \\\\$\" app/Console/Commands/ConsumeWebhooksCommand.php)"
+      "Bash(grep -n \"signature\\\\|protected \\\\$\" app/Console/Commands/ConsumeWebhooksCommand.php)",
+      "Bash(grep *)"
     ]
   },
   "enableAllProjectMcpServers": true,
