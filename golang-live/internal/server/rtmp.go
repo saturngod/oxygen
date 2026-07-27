@@ -165,7 +165,15 @@ func (s *Server) handleRTMPConnInner(ctx context.Context, conn net.Conn) error {
 		return fmt.Errorf("create hls dir: %w", err)
 	}
 
+	// Plain fMP4, not low-latency. LL-HLS pins EXT-X-PART-INF:PART-TARGET to the
+	// longest part in the sliding window, but parts can only end on a frame
+	// boundary, so a 200ms target lands at 6 or 7 frames at 30fps and the target
+	// keeps flipping (200ms <-> 234ms) — right at the 85% minimum iOS enforces.
+	// The fMP4 variant has no parts, and unlike the low-latency variant it also
+	// writes the playlists to Directory, which is what the HLS disk fallback in
+	// Server.hls serves.
 	muxer := &gohlslib.Muxer{
+		Variant:   gohlslib.MuxerVariantFMP4,
 		Tracks:    hlsTracks,
 		Directory: hlsDir,
 		OnEncodeError: func(err error) {
