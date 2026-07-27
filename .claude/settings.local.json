@@ -31,7 +31,8 @@
       "Bash(cd \"$\\(go env GOMODCACHE\\)/github.com/bluenviron/gohlslib/v2@v2.3.2\")",
       "Bash(cd \"$\\(go env GOMODCACHE\\)/github.com/bluenviron/gortmplib@v0.3.2\")",
       "Bash(sed *)",
-      "Bash(ls -d \"$\\(go env GOMODCACHE\\)/github.com/bluenviron/mediacommon\"*/)"
+      "Bash(ls -d \"$\\(go env GOMODCACHE\\)/github.com/bluenviron/mediacommon\"*/)",
+      "Bash(PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres -d myan_video -c \"select id,title,status,active_session_id from live_streams limit 5;\" -c \"select count\\(*\\) from live_stream_sessions;\" -c \"select count\\(*\\) from live_stream_viewer_rollups;\")"
     ]
   },
   "enableAllProjectMcpServers": true,

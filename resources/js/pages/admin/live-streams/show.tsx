@@ -308,12 +308,12 @@ function ViewerChart({ rollups }: { rollups: ViewerRollup[] }) {
     }
 
     return (
-        <div className="flex h-28 items-end gap-1 rounded-lg border p-2">
+        <div className="flex h-28 items-stretch gap-1 rounded-lg border p-2">
             {rollups.map((rollup, index) => (
                 <div
                     key={rollup.minute ?? index}
-                    className="flex min-w-2 flex-1 items-end"
-                    title={`${rollup.current_viewers} viewers`}
+                    className="flex h-full min-w-2 flex-1 items-end"
+                    title={`${formatDate(rollup.minute)} - ${rollup.current_viewers} viewers`}
                 >
                     <div
                         className="w-full rounded-sm bg-primary/70"
