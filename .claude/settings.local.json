@@ -26,7 +26,12 @@
       "Bash(php -v)",
       "Bash(go test *)",
       "Bash(grep -n \"signature\\\\|protected \\\\$\" app/Console/Commands/ConsumeWebhooksCommand.php)",
-      "Bash(grep *)"
+      "Bash(grep *)",
+      "Bash(go env *)",
+      "Bash(cd \"$\\(go env GOMODCACHE\\)/github.com/bluenviron/gohlslib/v2@v2.3.2\")",
+      "Bash(cd \"$\\(go env GOMODCACHE\\)/github.com/bluenviron/gortmplib@v0.3.2\")",
+      "Bash(sed *)",
+      "Bash(ls -d \"$\\(go env GOMODCACHE\\)/github.com/bluenviron/mediacommon\"*/)"
     ]
   },
   "enableAllProjectMcpServers": true,

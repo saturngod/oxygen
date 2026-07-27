@@ -353,16 +353,20 @@ func wireRTMPToHLS(
 	for _, rtmpTrack := range reader.Tracks() {
 		hlsTrack := trackMap[rtmpTrack]
 
-		switch rtmpTrack.Codec.(type) {
+		switch codec := rtmpTrack.Codec.(type) {
 		case *rtmpcodecs.H264:
+			sps, pps := codec.SPS, codec.PPS
 			reader.OnDataH264(rtmpTrack, func(pts time.Duration, _ time.Duration, au [][]byte) {
+				au = withH264ParameterSets(au, sps, pps)
 				if err := muxer.WriteH264(hlsTrack, time.Now(), toClock(pts, hlsTrack.ClockRate), au); err != nil {
 					log.Warn("write h264 failed", "err", err, "public_id", publicID)
 				}
 			})
 
 		case *rtmpcodecs.H265:
+			vps, sps, pps := codec.VPS, codec.SPS, codec.PPS
 			reader.OnDataH265(rtmpTrack, func(pts time.Duration, _ time.Duration, au [][]byte) {
+				au = withH265ParameterSets(au, vps, sps, pps)
 				if err := muxer.WriteH265(hlsTrack, time.Now(), toClock(pts, hlsTrack.ClockRate), au); err != nil {
 					log.Warn("write h265 failed", "err", err, "public_id", publicID)
 				}
@@ -383,6 +387,105 @@ func wireRTMPToHLS(
 			})
 		}
 	}
+}
+
+// H.264/H.265 NALU types needed to detect key frames and parameter sets.
+const (
+	h264NALUTypeIDR = 5
+	h264NALUTypeSPS = 7
+	h264NALUTypePPS = 8
+
+	h265NALUTypeVPS = 32
+	h265NALUTypeSPS = 33
+	h265NALUTypePPS = 34
+
+	// IRAP (random access) NALU types span BLA_W_LP..RSV_IRAP_VCL23.
+	h265NALUTypeIRAPFirst = 16
+	h265NALUTypeIRAPLast  = 23
+)
+
+// withH264ParameterSets prepends the SPS/PPS carried by the RTMP AVC sequence
+// header to every key frame that does not already repeat them in-band.
+//
+// Many publishers (OBS among them) send parameter sets only once, in the
+// sequence header. gohlslib builds its DTS extractor from in-band NALUs only,
+// so without this the muxer fails every write with "SPS not received yet" and
+// never produces a segment or a playlist.
+func withH264ParameterSets(au [][]byte, sps, pps []byte) [][]byte {
+	if len(sps) == 0 || len(pps) == 0 {
+		return au
+	}
+
+	keyFrame := false
+	hasSPS := false
+	hasPPS := false
+
+	for _, nalu := range au {
+		if len(nalu) == 0 {
+			continue
+		}
+
+		switch nalu[0] & 0x1F {
+		case h264NALUTypeIDR:
+			keyFrame = true
+		case h264NALUTypeSPS:
+			hasSPS = true
+		case h264NALUTypePPS:
+			hasPPS = true
+		}
+	}
+
+	if !keyFrame || (hasSPS && hasPPS) {
+		return au
+	}
+
+	return prependNALUs(au, sps, pps)
+}
+
+// withH265ParameterSets is the HEVC counterpart of withH264ParameterSets.
+func withH265ParameterSets(au [][]byte, vps, sps, pps []byte) [][]byte {
+	if len(vps) == 0 || len(sps) == 0 || len(pps) == 0 {
+		return au
+	}
+
+	keyFrame := false
+	hasVPS := false
+	hasSPS := false
+	hasPPS := false
+
+	for _, nalu := range au {
+		if len(nalu) == 0 {
+			continue
+		}
+
+		typ := (nalu[0] >> 1) & 0x3F
+
+		switch {
+		case typ >= h265NALUTypeIRAPFirst && typ <= h265NALUTypeIRAPLast:
+			keyFrame = true
+		case typ == h265NALUTypeVPS:
+			hasVPS = true
+		case typ == h265NALUTypeSPS:
+			hasSPS = true
+		case typ == h265NALUTypePPS:
+			hasPPS = true
+		}
+	}
+
+	if !keyFrame || (hasVPS && hasSPS && hasPPS) {
+		return au
+	}
+
+	return prependNALUs(au, vps, sps, pps)
+}
+
+// prependNALUs returns a new access unit with the given NALUs placed in front,
+// leaving the caller's slice untouched.
+func prependNALUs(au [][]byte, nalus ...[]byte) [][]byte {
+	out := make([][]byte, 0, len(nalus)+len(au))
+	out = append(out, nalus...)
+
+	return append(out, au...)
 }
 
 type logger interface {
