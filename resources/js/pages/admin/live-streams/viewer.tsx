@@ -39,13 +39,14 @@ type Analytics = {
     range_label: string;
     range_start: string;
     range_end: string;
+    timezone: 'UTC';
     granularity: 'hour' | 'day' | 'month';
     source_note: string;
     points: AnalyticsPoint[];
     summary: {
         peak_viewers: number;
         broadcasts: number;
-        viewer_visits: number;
+        viewer_identity_additions: number;
         playback_requests: number;
     };
 };
@@ -83,6 +84,8 @@ function formatPointLabel(
             month: detailed ? 'short' : undefined,
             day: detailed ? 'numeric' : undefined,
             hour: 'numeric',
+            timeZone: 'UTC',
+            timeZoneName: detailed ? 'short' : undefined,
         });
     }
 
@@ -91,12 +94,14 @@ function formatPointLabel(
             month: 'short',
             day: 'numeric',
             year: detailed ? 'numeric' : undefined,
+            timeZone: 'UTC',
         });
     }
 
     return date.toLocaleDateString(undefined, {
         month: 'short',
         year: detailed ? 'numeric' : undefined,
+        timeZone: 'UTC',
     });
 }
 
@@ -328,21 +333,22 @@ export default function ViewerAnalytics({
             icon: Eye,
         },
         {
-            label: 'Broadcasts started',
+            label: 'Broadcasts active',
             value: analytics.summary.broadcasts,
-            description: 'Stream sessions that began in this range.',
+            description: 'Stream sessions that overlapped this range.',
             icon: ListVideo,
         },
         {
-            label: 'Viewer visits',
-            value: analytics.summary.viewer_visits,
-            description: 'Unique per broadcast; repeat visits may count again.',
+            label: 'Viewer identities',
+            value: analytics.summary.viewer_identity_additions,
+            description:
+                'New identities within publishing sessions; not unique people.',
             icon: Users,
         },
         {
             label: 'Playback requests',
             value: analytics.summary.playback_requests,
-            description: 'Combined requests for broadcasts started here.',
+            description: 'Playlist and media requests recorded in this range.',
             icon: MousePointerClick,
         },
     ];

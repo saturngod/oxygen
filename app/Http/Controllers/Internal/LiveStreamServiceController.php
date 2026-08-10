@@ -132,26 +132,26 @@ class LiveStreamServiceController extends Controller
         $liveStream = $this->findStream($validated['public_id']);
         $session = $this->findSession($liveStream, $validated['session_id']);
         $minute = isset($validated['minute'])
-            ? Carbon::parse($validated['minute'])->startOfMinute()
+            ? Carbon::parse($validated['minute'])->utc()->startOfMinute()
             : null;
 
         DB::transaction(function () use ($liveStream, $session, $validated, $minute): void {
             [$lockedLiveStream, $lockedSession] = $this->lockStreamAndSession($liveStream, $session);
 
-            if ($minute !== null && isset($validated['current_viewers'])) {
-                LiveStreamViewerRollup::query()->updateOrCreate(
-                    [
-                        'live_stream_session_id' => $lockedSession->id,
-                        'minute' => $minute,
-                    ],
-                    [
-                        'organization_id' => $lockedLiveStream->organization_id,
-                        'live_stream_id' => $lockedLiveStream->id,
-                        'current_viewers' => $validated['current_viewers'],
-                        'unique_viewers_seen' => max($lockedSession->unique_viewers, (int) ($validated['unique_viewers'] ?? 0)),
-                        'playlist_requests' => max($lockedSession->playlist_requests, (int) ($validated['playlist_requests'] ?? 0)),
-                        'segment_requests' => max($lockedSession->segment_requests, (int) ($validated['segment_requests'] ?? 0)),
-                    ],
+            if ($lockedSession->status === LiveStreamSessionStatus::Ended) {
+                return;
+            }
+
+            if ($minute !== null && array_key_exists('current_viewers', $validated)) {
+                $this->recordViewerSample(
+                    $lockedLiveStream,
+                    $lockedSession,
+                    $minute,
+                    (int) $validated['current_viewers'],
+                    (int) ($validated['unique_viewers'] ?? $lockedSession->unique_viewers),
+                    (int) ($validated['playlist_requests'] ?? $lockedSession->playlist_requests),
+                    (int) ($validated['segment_requests'] ?? $lockedSession->segment_requests),
+                    (int) ($validated['peak_viewers'] ?? $validated['current_viewers']),
                 );
             }
 
@@ -261,8 +261,8 @@ class LiveStreamServiceController extends Controller
         $session = $this->findSession($liveStream, $validated['session_id']);
 
         $minute = isset($validated['minute'])
-            ? Carbon::parse($validated['minute'])->startOfMinute()
-            : now()->startOfMinute();
+            ? Carbon::parse($validated['minute'])->utc()->startOfMinute()
+            : now()->utc()->startOfMinute();
 
         DB::transaction(function () use ($liveStream, $session, $validated, $minute): void {
             [$lockedLiveStream, $lockedSession] = $this->lockStreamAndSession($liveStream, $session);
@@ -271,31 +271,65 @@ class LiveStreamServiceController extends Controller
                 return;
             }
 
-            LiveStreamViewerRollup::query()->updateOrCreate(
-                [
-                    'live_stream_session_id' => $lockedSession->id,
-                    'minute' => $minute,
-                ],
-                [
-                    'organization_id' => $lockedLiveStream->organization_id,
-                    'live_stream_id' => $lockedLiveStream->id,
-                    'current_viewers' => $validated['current_viewers'],
-                    'unique_viewers_seen' => $validated['unique_viewers_seen'],
-                    'playlist_requests' => $validated['playlist_requests'],
-                    'segment_requests' => $validated['segment_requests'],
-                ],
+            $this->recordViewerSample(
+                $lockedLiveStream,
+                $lockedSession,
+                $minute,
+                (int) $validated['current_viewers'],
+                (int) $validated['unique_viewers_seen'],
+                (int) $validated['playlist_requests'],
+                (int) $validated['segment_requests'],
             );
-
-            $lockedSession->forceFill([
-                'current_viewers' => $validated['current_viewers'],
-                'peak_viewers' => max($lockedSession->peak_viewers, (int) $validated['current_viewers']),
-                'unique_viewers' => max($lockedSession->unique_viewers, (int) $validated['unique_viewers_seen']),
-                'playlist_requests' => max($lockedSession->playlist_requests, (int) $validated['playlist_requests']),
-                'segment_requests' => max($lockedSession->segment_requests, (int) $validated['segment_requests']),
-            ])->save();
         });
 
         return response()->json(['ok' => true]);
+    }
+
+    private function recordViewerSample(
+        LiveStream $liveStream,
+        LiveStreamSession $session,
+        Carbon $minute,
+        int $currentViewers,
+        int $uniqueViewers,
+        int $playlistRequests,
+        int $segmentRequests,
+        ?int $samplePeakViewers = null,
+    ): void {
+        $uniqueViewers = max($session->unique_viewers, $uniqueViewers);
+        $playlistRequests = max($session->playlist_requests, $playlistRequests);
+        $segmentRequests = max($session->segment_requests, $segmentRequests);
+
+        $rollup = LiveStreamViewerRollup::query()->firstOrNew([
+            'live_stream_session_id' => $session->id,
+            'minute' => $minute,
+        ]);
+
+        $rollup->forceFill([
+            'organization_id' => $liveStream->organization_id,
+            'live_stream_id' => $liveStream->id,
+            'current_viewers' => $currentViewers,
+            'peak_viewers' => max(
+                (int) $rollup->peak_viewers,
+                (int) $rollup->current_viewers,
+                $currentViewers,
+                $samplePeakViewers ?? $currentViewers,
+            ),
+            'unique_viewers_seen' => max($rollup->unique_viewers_seen, $uniqueViewers),
+            'playlist_requests' => max($rollup->playlist_requests, $playlistRequests),
+            'segment_requests' => max($rollup->segment_requests, $segmentRequests),
+            'viewer_identity_additions' => (int) $rollup->viewer_identity_additions + ($uniqueViewers - $session->unique_viewers),
+            'playlist_requests_delta' => (int) $rollup->playlist_requests_delta + ($playlistRequests - $session->playlist_requests),
+            'segment_requests_delta' => (int) $rollup->segment_requests_delta + ($segmentRequests - $session->segment_requests),
+            'sample_count' => (int) $rollup->sample_count + 1,
+        ])->save();
+
+        $session->forceFill([
+            'current_viewers' => $currentViewers,
+            'peak_viewers' => max($session->peak_viewers, $currentViewers),
+            'unique_viewers' => $uniqueViewers,
+            'playlist_requests' => $playlistRequests,
+            'segment_requests' => $segmentRequests,
+        ])->save();
     }
 
     private function authorizeService(Request $request): void

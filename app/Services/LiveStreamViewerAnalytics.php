@@ -4,10 +4,9 @@ namespace App\Services;
 
 use App\Enums\LiveStreamViewerPeriod;
 use App\Models\LiveStream;
-use App\Models\LiveStreamSession;
+use App\Models\LiveStreamViewerHourlyRollup;
 use App\Models\LiveStreamViewerRollup;
 use Carbon\CarbonImmutable;
-use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Date;
 
 class LiveStreamViewerAnalytics
@@ -17,10 +16,11 @@ class LiveStreamViewerAnalytics
      *     range_label: string,
      *     range_start: string,
      *     range_end: string,
+     *     timezone: string,
      *     granularity: string,
      *     source_note: string,
      *     points: list<array{timestamp: string, value: int}>,
-     *     summary: array{peak_viewers: int, broadcasts: int, viewer_visits: int, playback_requests: int}
+     *     summary: array{peak_viewers: int, broadcasts: int, viewer_identity_additions: int, playback_requests: int}
      * }
      */
     public function build(LiveStream $liveStream, LiveStreamViewerPeriod $period): array
@@ -28,33 +28,34 @@ class LiveStreamViewerAnalytics
         $end = Date::now()->toImmutable()->utc();
         $start = $this->rangeStart($period, $end);
         $points = $this->emptyPoints($period, $start);
-        $sessions = $this->sessions($liveStream, $start, $end);
+        $hourlyMetrics = $this->hourlyMetrics($liveStream, $start, $end);
 
-        if ($period === LiveStreamViewerPeriod::Year) {
-            $this->applySessionPeaks($points, $sessions);
-        } else {
-            $this->applyRollupPeaks($points, $liveStream, $period, $start, $end);
+        foreach ($hourlyMetrics as $metrics) {
+            $key = $this->bucketKey($period, $metrics['bucket_start']);
+
+            if (isset($points[$key])) {
+                $points[$key]['value'] = max($points[$key]['value'], $metrics['peak_viewers']);
+            }
         }
 
         return [
             'range_label' => $period->label(),
             'range_start' => $start->toIso8601String(),
             'range_end' => $end->toIso8601String(),
+            'timezone' => 'UTC',
             'granularity' => match ($period) {
                 LiveStreamViewerPeriod::Day => 'hour',
                 LiveStreamViewerPeriod::Month => 'day',
                 LiveStreamViewerPeriod::Year => 'month',
             },
-            'source_note' => $period === LiveStreamViewerPeriod::Year
-                ? 'Monthly points use each broadcast session peak. Session summaries remain available after minute samples expire.'
-                : 'Hourly and daily points use minute-by-minute viewer samples.',
+            'source_note' => 'Recent data uses minute samples. Completed UTC hours are retained as durable aggregates.',
             'points' => array_values($points),
             'summary' => [
                 'peak_viewers' => (int) (collect($points)->max('value') ?? 0),
-                'broadcasts' => $sessions->count(),
-                'viewer_visits' => (int) $sessions->sum('unique_viewers'),
-                'playback_requests' => (int) $sessions->sum(
-                    fn (LiveStreamSession $session): int => $session->playlist_requests + $session->segment_requests,
+                'broadcasts' => $this->overlappingBroadcastCount($liveStream, $start, $end),
+                'viewer_identity_additions' => (int) collect($hourlyMetrics)->sum('viewer_identity_additions'),
+                'playback_requests' => (int) collect($hourlyMetrics)->sum(
+                    fn (array $metrics): int => $metrics['playlist_requests'] + $metrics['segment_requests'],
                 ),
             ],
         ];
@@ -98,74 +99,107 @@ class LiveStreamViewerAnalytics
     }
 
     /**
-     * @return Collection<int, LiveStreamSession>
+     * @return array<string, array{
+     *     bucket_start: CarbonImmutable,
+     *     peak_viewers: int,
+     *     viewer_identity_additions: int,
+     *     playlist_requests: int,
+     *     segment_requests: int
+     * }>
      */
-    private function sessions(
+    private function hourlyMetrics(
         LiveStream $liveStream,
         CarbonImmutable $start,
         CarbonImmutable $end,
-    ): Collection {
-        return $liveStream->sessions()
-            ->whereBetween('started_at', [$start, $end])
-            ->orderBy('started_at')
-            ->get([
-                'id',
-                'live_stream_id',
-                'started_at',
+    ): array {
+        $metrics = [];
+        $hourlyRollups = $liveStream->viewerHourlyRollups()
+            ->select([
+                'bucket_start',
                 'peak_viewers',
-                'unique_viewers',
+                'viewer_identity_additions',
                 'playlist_requests',
                 'segment_requests',
-            ]);
-    }
+            ])
+            ->where('bucket_start', '>=', $start->startOfHour())
+            ->where('bucket_start', '<=', $end)
+            ->orderBy('bucket_start')
+            ->cursor();
 
-    /**
-     * @param  array<string, array{timestamp: string, value: int}>  $points
-     * @param  Collection<int, LiveStreamSession>  $sessions
-     */
-    private function applySessionPeaks(array &$points, Collection $sessions): void
-    {
-        foreach ($sessions as $session) {
-            if ($session->started_at === null) {
+        /** @var LiveStreamViewerHourlyRollup $rollup */
+        foreach ($hourlyRollups as $rollup) {
+            if ($rollup->bucket_start === null) {
                 continue;
             }
 
-            $key = $this->bucketKey(LiveStreamViewerPeriod::Year, $session->started_at->utc());
-
-            if (isset($points[$key])) {
-                $points[$key]['value'] = max($points[$key]['value'], $session->peak_viewers);
-            }
+            $bucket = $rollup->bucket_start->utc()->startOfHour();
+            $metrics[$bucket->format('Y-m-d-H')] = [
+                'bucket_start' => $bucket,
+                'peak_viewers' => $rollup->peak_viewers,
+                'viewer_identity_additions' => $rollup->viewer_identity_additions,
+                'playlist_requests' => $rollup->playlist_requests,
+                'segment_requests' => $rollup->segment_requests,
+            ];
         }
-    }
 
-    /**
-     * @param  array<string, array{timestamp: string, value: int}>  $points
-     */
-    private function applyRollupPeaks(
-        array &$points,
-        LiveStream $liveStream,
-        LiveStreamViewerPeriod $period,
-        CarbonImmutable $start,
-        CarbonImmutable $end,
-    ): void {
-        $rollups = $liveStream->viewerRollups()
-            ->select(['minute', 'current_viewers'])
-            ->whereBetween('minute', [$start, $end])
+        $minuteMetrics = [];
+        $minuteRollups = $liveStream->viewerRollups()
+            ->select([
+                'minute',
+                'current_viewers',
+                'peak_viewers',
+                'viewer_identity_additions',
+                'playlist_requests_delta',
+                'segment_requests_delta',
+            ])
+            ->where('minute', '>=', $start)
+            ->where('minute', '<=', $end)
             ->orderBy('minute')
             ->cursor();
 
         /** @var LiveStreamViewerRollup $rollup */
-        foreach ($rollups as $rollup) {
+        foreach ($minuteRollups as $rollup) {
             if ($rollup->minute === null) {
                 continue;
             }
 
-            $key = $this->bucketKey($period, $rollup->minute->utc());
+            $bucket = $rollup->minute->utc()->startOfHour();
+            $key = $bucket->format('Y-m-d-H');
+            $aggregate = $minuteMetrics[$key] ?? [
+                'bucket_start' => $bucket,
+                'peak_viewers' => 0,
+                'viewer_identity_additions' => 0,
+                'playlist_requests' => 0,
+                'segment_requests' => 0,
+            ];
 
-            if (isset($points[$key])) {
-                $points[$key]['value'] = max($points[$key]['value'], $rollup->current_viewers);
-            }
+            $aggregate['peak_viewers'] = max(
+                $aggregate['peak_viewers'],
+                $rollup->peak_viewers,
+                $rollup->current_viewers,
+            );
+            $aggregate['viewer_identity_additions'] += $rollup->viewer_identity_additions;
+            $aggregate['playlist_requests'] += $rollup->playlist_requests_delta;
+            $aggregate['segment_requests'] += $rollup->segment_requests_delta;
+            $minuteMetrics[$key] = $aggregate;
         }
+
+        return [...$metrics, ...$minuteMetrics];
+    }
+
+    private function overlappingBroadcastCount(
+        LiveStream $liveStream,
+        CarbonImmutable $start,
+        CarbonImmutable $end,
+    ): int {
+        return $liveStream->sessions()
+            ->whereNotNull('started_at')
+            ->where('started_at', '<=', $end)
+            ->where(function ($query) use ($start): void {
+                $query->whereNull('ended_at')
+                    ->orWhere('ended_at', '>=', $start);
+            })
+            ->count();
     }
 
     private function bucketKey(LiveStreamViewerPeriod $period, CarbonImmutable $timestamp): string

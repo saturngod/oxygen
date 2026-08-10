@@ -72,6 +72,11 @@ class LiveStream extends Model
         return $this->hasMany(LiveStreamViewerRollup::class);
     }
 
+    public function viewerHourlyRollups(): HasMany
+    {
+        return $this->hasMany(LiveStreamViewerHourlyRollup::class);
+    }
+
     public function isLive(): bool
     {
         return $this->status === LiveStreamStatus::Live;

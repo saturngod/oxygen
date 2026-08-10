@@ -3,17 +3,21 @@
 namespace App\Console\Commands;
 
 use App\Models\LiveStreamViewerRollup;
+use App\Services\LiveStreamViewerHourlyCompactor;
 use Illuminate\Console\Command;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Date;
 
 class PruneViewerRollupsCommand extends Command
 {
-    protected $signature = 'rollups:prune {--days=30}';
+    protected $signature = 'rollups:prune {--days=}';
 
-    protected $description = 'Delete per-minute live stream viewer rollups older than the retention window (session summaries are kept)';
+    protected $description = 'Compact and delete per-minute viewer rollups older than the retention window';
 
-    public function handle(): int
+    public function handle(LiveStreamViewerHourlyCompactor $compactor): int
     {
-        $days = (int) $this->option('days');
+        $days = (int) ($this->option('days') ?? config('services.live.viewer_rollup_retention_days', 30));
 
         if ($days < 1) {
             $this->error('The --days option must be a positive integer.');
@@ -21,24 +25,45 @@ class PruneViewerRollupsCommand extends Command
             return self::FAILURE;
         }
 
-        $cutoff = now()->subDays($days)->startOfMinute();
+        $cutoff = Date::now()->toImmutable()->utc()->subDays($days)->startOfHour();
 
-        $this->info("Pruning viewer rollups older than [{$cutoff->toDateTimeString()}] ({$days} days).");
+        $this->info("Pruning viewer rollups older than [{$cutoff->toDateTimeString()} UTC] ({$days} days).");
 
-        $deleted = 0;
+        $lock = Cache::lock('live-stream-viewer-rollup-maintenance', 3600);
 
-        do {
-            $ids = LiveStreamViewerRollup::query()
+        if (! $lock->get()) {
+            $this->warn('Viewer rollup maintenance is already running.');
+
+            return self::FAILURE;
+        }
+
+        try {
+            $oldestMinute = LiveStreamViewerRollup::query()
                 ->where('minute', '<', $cutoff)
-                ->limit(1000)
-                ->pluck('id');
+                ->min('minute');
 
-            if ($ids->isNotEmpty()) {
-                $deleted += LiveStreamViewerRollup::query()->whereIn('id', $ids)->delete();
+            if ($oldestMinute !== null) {
+                $oldestHour = Carbon::parse($oldestMinute)->toImmutable()->utc()->startOfHour();
+                $compactor->compact($oldestHour, $cutoff);
             }
-        } while ($ids->isNotEmpty());
 
-        $this->info("Deleted {$deleted} viewer rollup row(s).");
+            $deleted = 0;
+
+            do {
+                $ids = LiveStreamViewerRollup::query()
+                    ->where('minute', '<', $cutoff)
+                    ->limit(1000)
+                    ->pluck('id');
+
+                if ($ids->isNotEmpty()) {
+                    $deleted += LiveStreamViewerRollup::query()->whereIn('id', $ids)->delete();
+                }
+            } while ($ids->isNotEmpty());
+
+            $this->info("Deleted {$deleted} viewer rollup row(s) after hourly compaction.");
+        } finally {
+            $lock->release();
+        }
 
         return self::SUCCESS;
     }

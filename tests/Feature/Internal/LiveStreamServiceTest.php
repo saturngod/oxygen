@@ -136,9 +136,39 @@ test('service callbacks track live session and viewer rollups', function () {
         ->and($rollup->live_stream_session_id)->toBe($sessionId)
         ->and($rollup->minute->toIso8601String())->toBe('2026-05-22T18:15:00+00:00')
         ->and($rollup->current_viewers)->toBe(12)
+        ->and($rollup->peak_viewers)->toBe(12)
         ->and($rollup->unique_viewers_seen)->toBe(18)
         ->and($rollup->playlist_requests)->toBe(44)
-        ->and($rollup->segment_requests)->toBe(91);
+        ->and($rollup->segment_requests)->toBe(91)
+        ->and($rollup->viewer_identity_additions)->toBe(18)
+        ->and($rollup->playlist_requests_delta)->toBe(44)
+        ->and($rollup->segment_requests_delta)->toBe(91)
+        ->and($rollup->sample_count)->toBe(1);
+
+    $this->withHeader('X-Live-Service-Token', 'live-token')
+        ->postJson(route('internal.live.viewer-snapshot'), [
+            'public_id' => $liveStream->public_id,
+            'session_id' => $sessionId,
+            'minute' => '2026-05-22T18:15:30Z',
+            'current_viewers' => 3,
+            'unique_viewers_seen' => 17,
+            'playlist_requests' => 40,
+            'segment_requests' => 80,
+        ])
+        ->assertOk();
+
+    $session->refresh();
+    $rollup->refresh();
+
+    expect($session->unique_viewers)->toBe(18)
+        ->and($session->playlist_requests)->toBe(44)
+        ->and($session->segment_requests)->toBe(91)
+        ->and($rollup->current_viewers)->toBe(3)
+        ->and($rollup->peak_viewers)->toBe(12)
+        ->and($rollup->viewer_identity_additions)->toBe(18)
+        ->and($rollup->playlist_requests_delta)->toBe(44)
+        ->and($rollup->segment_requests_delta)->toBe(91)
+        ->and($rollup->sample_count)->toBe(2);
 
     $this->withHeader('X-Live-Service-Token', 'live-token')
         ->postJson(route('internal.live.session-ended'), [
@@ -155,6 +185,7 @@ test('service callbacks track live session and viewer rollups', function () {
 
     $liveStream->refresh();
     $session->refresh();
+    $rollup->refresh();
 
     expect($liveStream->status)->toBe(LiveStreamStatus::Offline)
         ->and($liveStream->active_session_id)->toBeNull()
@@ -162,7 +193,12 @@ test('service callbacks track live session and viewer rollups', function () {
         ->and($session->peak_viewers)->toBe(20)
         ->and($session->unique_viewers)->toBe(33)
         ->and(LiveStreamViewerRollup::query()->count())->toBe(1)
-        ->and($rollup->fresh()->current_viewers)->toBe(4)
+        ->and($rollup->current_viewers)->toBe(4)
+        ->and($rollup->peak_viewers)->toBe(20)
+        ->and($rollup->viewer_identity_additions)->toBe(33)
+        ->and($rollup->playlist_requests_delta)->toBe(100)
+        ->and($rollup->segment_requests_delta)->toBe(250)
+        ->and($rollup->sample_count)->toBe(3)
         ->and($rollup->minute->toIso8601String())->toBe('2026-05-22T18:15:00+00:00');
 
     $this->withHeader('X-Live-Service-Token', 'live-token')
@@ -214,9 +250,14 @@ test('session end persists a final viewer rollup without a periodic snapshot', f
         ->and($rollup->live_stream_session_id)->toBe($sessionId)
         ->and($rollup->minute->toIso8601String())->toBe('2026-08-09T18:24:00+00:00')
         ->and($rollup->current_viewers)->toBe(0)
+        ->and($rollup->peak_viewers)->toBe(2)
         ->and($rollup->unique_viewers_seen)->toBe(2)
         ->and($rollup->playlist_requests)->toBe(3)
         ->and($rollup->segment_requests)->toBe(7)
+        ->and($rollup->viewer_identity_additions)->toBe(2)
+        ->and($rollup->playlist_requests_delta)->toBe(3)
+        ->and($rollup->segment_requests_delta)->toBe(7)
+        ->and($rollup->sample_count)->toBe(1)
         ->and($liveStream->fresh()->status)->toBe(LiveStreamStatus::Offline)
         ->and(LiveStreamSession::query()->findOrFail($sessionId)->status)->toBe(LiveStreamSessionStatus::Ended);
 
@@ -225,7 +266,9 @@ test('session end persists a final viewer rollup without a periodic snapshot', f
         ->assertOk();
 
     expect(LiveStreamViewerRollup::query()->count())->toBe(1)
-        ->and(LiveStreamViewerRollup::query()->sole()->id)->toBe($rollup->id);
+        ->and(LiveStreamViewerRollup::query()->sole()->id)->toBe($rollup->id)
+        ->and(LiveStreamViewerRollup::query()->sole()->viewer_identity_additions)->toBe(2)
+        ->and(LiveStreamViewerRollup::query()->sole()->sample_count)->toBe(1);
 });
 
 test('session start callbacks are idempotent by external id', function () {

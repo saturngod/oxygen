@@ -8,4 +8,12 @@ Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());
 })->purpose('Display an inspiring quote');
 
-Schedule::command('rollups:prune')->daily();
+Schedule::command('rollups:compact-hourly')
+    ->hourlyAt(5)
+    ->withoutOverlapping(60)
+    ->onOneServer();
+
+Schedule::command('rollups:prune')
+    ->dailyAt('01:15')
+    ->withoutOverlapping(60)
+    ->onOneServer();

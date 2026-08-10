@@ -5,6 +5,7 @@ use App\Enums\LiveStreamStatus;
 use App\Enums\OrganizationRole;
 use App\Models\LiveStream;
 use App\Models\LiveStreamSession;
+use App\Models\LiveStreamViewerHourlyRollup;
 use App\Models\LiveStreamViewerRollup;
 use App\Models\Organization;
 use App\Models\Profile;
@@ -170,6 +171,10 @@ test('admin can view hourly viewer analytics with peak values per bucket', funct
         'live_stream_session_id' => $session->id,
         'minute' => now()->subHour()->startOfHour()->addMinutes(10),
         'current_viewers' => 7,
+        'peak_viewers' => 7,
+        'viewer_identity_additions' => 4,
+        'playlist_requests_delta' => 15,
+        'segment_requests_delta' => 25,
     ]);
 
     LiveStreamViewerRollup::factory()->create([
@@ -178,6 +183,10 @@ test('admin can view hourly viewer analytics with peak values per bucket', funct
         'live_stream_session_id' => $session->id,
         'minute' => now()->startOfHour()->addMinutes(5),
         'current_viewers' => 12,
+        'peak_viewers' => 12,
+        'viewer_identity_additions' => 5,
+        'playlist_requests_delta' => 25,
+        'segment_requests_delta' => 35,
     ]);
 
     $this->actingAs($user)
@@ -192,7 +201,7 @@ test('admin can view hourly viewer analytics with peak values per bucket', funct
             ->where('analytics.points.23.value', 12)
             ->where('analytics.summary.peak_viewers', 12)
             ->where('analytics.summary.broadcasts', 1)
-            ->where('analytics.summary.viewer_visits', 9)
+            ->where('analytics.summary.viewer_identity_additions', 9)
             ->where('analytics.summary.playback_requests', 100)
             ->missing('liveStream.stream_key')
             ->missing('liveStream.rtmp_url')
@@ -212,6 +221,7 @@ test('monthly viewer analytics uses the peak minute sample for each day', functi
             'live_stream_session_id' => $session->id,
             'minute' => $sampleDay->addHours($index + 1),
             'current_viewers' => $viewers,
+            'peak_viewers' => $viewers,
         ]);
     }
 
@@ -232,22 +242,29 @@ test('monthly viewer analytics uses the peak minute sample for each day', functi
         );
 });
 
-test('yearly viewer analytics remains available from retained session summaries', function () {
+test('yearly viewer analytics uses durable hourly rollups and counts overlapping broadcasts', function () {
     [$user, $organization] = liveStreamAdmin();
     $liveStream = LiveStream::factory()->for($organization)->create();
 
     LiveStreamSession::factory()->for($liveStream)->create([
-        'started_at' => now()->subMonthsNoOverflow(10)->startOfMonth()->addDay(),
+        'started_at' => now()->subYears(2),
+        'ended_at' => null,
+    ]);
+
+    LiveStreamViewerHourlyRollup::factory()->for($liveStream)->create([
+        'organization_id' => $organization->id,
+        'bucket_start' => now()->subMonthsNoOverflow(10)->startOfMonth()->addDay()->startOfHour(),
         'peak_viewers' => 31,
-        'unique_viewers' => 18,
+        'viewer_identity_additions' => 18,
         'playlist_requests' => 70,
         'segment_requests' => 130,
     ]);
 
-    LiveStreamSession::factory()->for($liveStream)->create([
-        'started_at' => now()->startOfMonth()->addDay(),
+    LiveStreamViewerHourlyRollup::factory()->for($liveStream)->create([
+        'organization_id' => $organization->id,
+        'bucket_start' => now()->startOfMonth()->addDay()->startOfHour(),
         'peak_viewers' => 9,
-        'unique_viewers' => 6,
+        'viewer_identity_additions' => 6,
         'playlist_requests' => 20,
         'segment_requests' => 30,
     ]);
@@ -266,8 +283,8 @@ test('yearly viewer analytics remains available from retained session summaries'
             ->where('analytics.points.1.value', 31)
             ->where('analytics.points.11.value', 9)
             ->where('analytics.summary.peak_viewers', 31)
-            ->where('analytics.summary.broadcasts', 2)
-            ->where('analytics.summary.viewer_visits', 24)
+            ->where('analytics.summary.broadcasts', 1)
+            ->where('analytics.summary.viewer_identity_additions', 24)
             ->where('analytics.summary.playback_requests', 250)
         );
 });

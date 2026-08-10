@@ -46,6 +46,8 @@ return [
         'service_token' => env('LIVE_SERVICE_TOKEN'),
         'control_url' => env('LIVE_CONTROL_URL'),
         'control_token' => env('LIVE_CONTROL_TOKEN'),
+        'viewer_rollup_retention_days' => (int) env('LIVE_VIEWER_ROLLUP_RETENTION_DAYS', 30),
+        'viewer_compaction_lookback_hours' => (int) env('LIVE_VIEWER_COMPACTION_LOOKBACK_HOURS', 48),
     ],
 
 ];

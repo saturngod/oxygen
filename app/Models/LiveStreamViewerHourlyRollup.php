@@ -2,7 +2,7 @@
 
 namespace App\Models;
 
-use Database\Factories\LiveStreamViewerRollupFactory;
+use Database\Factories\LiveStreamViewerHourlyRollupFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Concerns\HasUuids;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -12,21 +12,16 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 #[Fillable([
     'organization_id',
     'live_stream_id',
-    'live_stream_session_id',
-    'minute',
-    'current_viewers',
+    'bucket_start',
     'peak_viewers',
-    'unique_viewers_seen',
+    'viewer_identity_additions',
     'playlist_requests',
     'segment_requests',
-    'viewer_identity_additions',
-    'playlist_requests_delta',
-    'segment_requests_delta',
     'sample_count',
 ])]
-class LiveStreamViewerRollup extends Model
+class LiveStreamViewerHourlyRollup extends Model
 {
-    /** @use HasFactory<LiveStreamViewerRollupFactory> */
+    /** @use HasFactory<LiveStreamViewerHourlyRollupFactory> */
     use HasFactory, HasUuids;
 
     /**
@@ -35,15 +30,11 @@ class LiveStreamViewerRollup extends Model
     protected function casts(): array
     {
         return [
-            'minute' => 'immutable_datetime',
-            'current_viewers' => 'integer',
+            'bucket_start' => 'immutable_datetime',
             'peak_viewers' => 'integer',
-            'unique_viewers_seen' => 'integer',
+            'viewer_identity_additions' => 'integer',
             'playlist_requests' => 'integer',
             'segment_requests' => 'integer',
-            'viewer_identity_additions' => 'integer',
-            'playlist_requests_delta' => 'integer',
-            'segment_requests_delta' => 'integer',
             'sample_count' => 'integer',
         ];
     }
@@ -56,10 +47,5 @@ class LiveStreamViewerRollup extends Model
     public function liveStream(): BelongsTo
     {
         return $this->belongsTo(LiveStream::class);
-    }
-
-    public function liveStreamSession(): BelongsTo
-    {
-        return $this->belongsTo(LiveStreamSession::class);
     }
 }
