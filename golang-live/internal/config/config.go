@@ -12,6 +12,8 @@ type Config struct {
 	Addr                 string
 	RTMPAddr             string
 	HLSRoot              string
+	FFmpegBin            string
+	FFmpegVideoCodec     string
 	CallbackRoot         string
 	LaravelURL           string
 	ServiceToken         string
@@ -32,6 +34,8 @@ func Load() Config {
 		Addr:                 getenv("LIVE_ADDR", ":8081"),
 		RTMPAddr:             getenv("LIVE_RTMP_ADDR", ":1935"),
 		HLSRoot:              getenv("LIVE_HLS_ROOT", "/tmp/oxygen-live/hls"),
+		FFmpegBin:            getenv("FFMPEG_BIN", "ffmpeg"),
+		FFmpegVideoCodec:     getenv("FFMPEG_VIDEO_CODEC", "libx264"),
 		CallbackRoot:         getenv("LIVE_CALLBACK_ROOT", "/tmp/oxygen-live/callbacks"),
 		LaravelURL:           strings.TrimRight(getenv("LARAVEL_URL", "http://127.0.0.1:8000"), "/"),
 		ServiceToken:         getenv("LIVE_SERVICE_TOKEN", ""),

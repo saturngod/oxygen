@@ -7,6 +7,7 @@ use App\Models\LiveStream;
 use App\Models\LiveStreamSession;
 use App\Models\LiveStreamViewerRollup;
 use App\Models\Organization;
+use App\Models\Profile;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
@@ -28,16 +29,19 @@ test('admin can create and view a live stream with encrypted stream key', functi
     $this->withoutVite();
 
     [$user, $organization] = liveStreamAdmin();
+    $profile = Profile::factory()->for($organization)->create();
 
     $this->actingAs($user)
         ->post(route('admin.organizations.live-streams.store', $organization), [
             'title' => 'Launch Stream',
+            'profile_id' => $profile->id,
         ])
         ->assertRedirect();
 
     $liveStream = LiveStream::query()->where('organization_id', $organization->id)->sole();
 
     expect($liveStream->title)->toBe('Launch Stream')
+        ->and($liveStream->profile_id)->toBe($profile->id)
         ->and($liveStream->rtmp_url)->toBe('rtmp://127.0.0.1:1935/live')
         ->and($liveStream->hls_url)->toContain($liveStream->public_id);
 
@@ -51,6 +55,40 @@ test('admin can create and view a live stream with encrypted stream key', functi
             ->component('admin/live-streams/show')
             ->where('liveStream.title', 'Launch Stream')
             ->where('liveStream.stream_key', $liveStream->stream_key)
+        );
+});
+
+test('live stream creation only accepts a profile from the organization', function () {
+    [$user, $organization] = liveStreamAdmin();
+    $foreignProfile = Profile::factory()->create();
+
+    $this->actingAs($user)
+        ->post(route('admin.organizations.live-streams.store', $organization), [
+            'title' => 'Invalid profile',
+            'profile_id' => $foreignProfile->id,
+        ])
+        ->assertSessionHasErrors('profile_id');
+
+    expect(LiveStream::query()->count())->toBe(0);
+});
+
+test('live stream create page lists profiles with the default first', function () {
+    [$user, $organization] = liveStreamAdmin();
+    Profile::factory()->for($organization)->create(['name' => 'Secondary']);
+    $default = Profile::factory()->for($organization)->create([
+        'name' => 'Live Adaptive',
+        'qualities' => ['360p', '720p'],
+        'is_default' => true,
+    ]);
+
+    $this->actingAs($user)
+        ->get(route('admin.organizations.live-streams.create', $organization))
+        ->assertSuccessful()
+        ->assertInertia(fn ($page) => $page
+            ->component('admin/live-streams/create')
+            ->has('profiles', 2)
+            ->where('profiles.0.id', $default->id)
+            ->where('profiles.0.qualities', ['360p', '720p'])
         );
 });
 

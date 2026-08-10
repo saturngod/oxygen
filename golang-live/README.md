@@ -24,6 +24,8 @@ go run ./cmd/live
 | `LIVE_ADDR` | `:8081` | HTTP listen address |
 | `LIVE_RTMP_ADDR` | `:1935` | RTMP ingest listen address |
 | `LIVE_HLS_ROOT` | `/tmp/oxygen-live/hls` | Local HLS root, one directory per stream public id |
+| `FFMPEG_BIN` | `ffmpeg` | ffmpeg executable used for adaptive live transcoding |
+| `FFMPEG_VIDEO_CODEC` | `libx264` | ffmpeg video encoder for live renditions |
 | `LIVE_CALLBACK_ROOT` | `/tmp/oxygen-live/callbacks` | Persistent outbox for terminal Laravel callbacks |
 | `LARAVEL_URL` | `http://127.0.0.1:8000` | Laravel app URL for internal callbacks |
 | `LIVE_SERVICE_TOKEN` | empty | Shared token sent to Laravel `internal/live/*` routes |
@@ -40,7 +42,7 @@ go run ./cmd/live
 - Put RTMP and HTTP behind appropriate network controls and TLS termination. Set `LIVE_TRUST_PROXY_HEADERS=true` only when the service is reachable exclusively through a proxy that replaces client-supplied forwarding headers.
 - Use `GET /healthz` for liveness and `GET /readyz` for readiness. Readiness stays false until Laravel recovery succeeds, RTMP is listening, and the callback outbox is writable.
 - Drain the process with `SIGTERM`. The service stops accepting publishers, disconnects active RTMP connections, persists their terminal callbacks, and waits for handlers before exiting.
-- The service currently remuxes one source rendition. Production adaptive bitrate requires a transcoding layer and a CDN/origin design outside this process.
+- Live streams created with a coding profile are transcoded into every selected rendition. Older streams without a profile continue to remux the source rendition.
 
 ## OBS Publishing
 
@@ -59,6 +61,6 @@ Rate control:      CBR
 B-frames:          0 if available
 ```
 
-On publish, the service validates `{public_id}` and `{stream_key}` with Laravel, starts a live session, remuxes RTMP media into HLS, and exposes playback through `GET /live/{public_id}/index.m3u8`.
+On publish, the service validates `{public_id}` and `{stream_key}` with Laravel, starts a live session, transcodes the profile's selected qualities into adaptive HLS, and exposes the master playlist through `GET /live/{public_id}/index.m3u8`.
 
-The live output is stored as fMP4 HLS under `LIVE_HLS_ROOT` for each stream public id. You will see playlists plus `.mp4` media files such as `*_init.mp4`, `*_segNN.mp4`, and `*_partNNN.mp4`. This service does not write `.ts` segments for live playback.
+The live output is stored as fMP4 HLS under `LIVE_HLS_ROOT` for each stream public id. Profile-based streams contain `index.m3u8` plus one `vN/playlist.m3u8` rendition playlist and `.m4s` segments per selected quality.

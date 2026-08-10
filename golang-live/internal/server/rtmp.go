@@ -155,43 +155,46 @@ func (s *Server) handleRTMPConnInner(ctx context.Context, conn net.Conn) error {
 		return fmt.Errorf("initialize rtmp reader: %w", err)
 	}
 
-	hlsTracks, trackMap, err := hlsTracksFromRTMP(reader.Tracks())
-	if err != nil {
-		return err
-	}
-
 	hlsDir := filepath.Join(s.cfg.HLSRoot, publicID)
 	if err := os.MkdirAll(hlsDir, 0o755); err != nil {
 		return fmt.Errorf("create hls dir: %w", err)
 	}
 
-	// Plain fMP4, not low-latency. LL-HLS pins EXT-X-PART-INF:PART-TARGET to the
-	// longest part in the sliding window, but parts can only end on a frame
-	// boundary, so a 200ms target lands at 6 or 7 frames at 30fps and the target
-	// keeps flipping (200ms <-> 234ms) — right at the 85% minimum iOS enforces.
-	// The fMP4 variant has no parts, and unlike the low-latency variant it also
-	// writes the playlists to Directory, which is what the HLS disk fallback in
-	// Server.hls serves.
-	muxer := &gohlslib.Muxer{
-		Variant:   gohlslib.MuxerVariantFMP4,
-		Tracks:    hlsTracks,
-		Directory: hlsDir,
-		OnEncodeError: func(err error) {
-			s.log.Warn("hls encode error", "err", err, "public_id", publicID)
-		},
-	}
-
-	if err := muxer.Start(); err != nil {
-		return fmt.Errorf("start hls muxer: %w", err)
-	}
-
 	session := &liveSession{
 		publicID: publicID,
-		muxer:    muxer,
 		conn:     conn,
 	}
 
-	// Registered before the session-started callback so the muxer is always
+	if len(auth.Stream.Qualities) > 0 {
+		adaptive, err := s.startAdaptiveHLS(ctx, reader, auth.Stream.Qualities, hlsDir, publicID, conn)
+		if err != nil {
+			return err
+		}
+		session.closeFn = adaptive.close
+	} else {
+		hlsTracks, trackMap, err := hlsTracksFromRTMP(reader.Tracks())
+		if err != nil {
+			return err
+		}
+
+		// Legacy streams without an encoding profile retain source-quality remuxing.
+		muxer := &gohlslib.Muxer{
+			Variant:   gohlslib.MuxerVariantFMP4,
+			Tracks:    hlsTracks,
+			Directory: hlsDir,
+			OnEncodeError: func(err error) {
+				s.log.Warn("hls encode error", "err", err, "public_id", publicID)
+			},
+		}
+
+		if err := muxer.Start(); err != nil {
+			return fmt.Errorf("start hls muxer: %w", err)
+		}
+		session.muxer = muxer
+		wireRTMPToHLS(reader, trackMap, muxer, s.log, publicID)
+	}
+
+	// Registered before the session-started callback so the HLS output is always
 	// closed and the on-disk HLS tree is always reaped, even if that callback
 	// fails. defer LIFO order on return: end callback -> unregister -> close
 	// muxer -> remove directory.
@@ -220,8 +223,6 @@ func (s *Server) handleRTMPConnInner(ctx context.Context, conn net.Conn) error {
 
 	s.tracker.StartSession(publicID, startResp.SessionID)
 	defer s.endRTMPSession(publicID, startResp.SessionID)
-
-	wireRTMPToHLS(reader, trackMap, muxer, s.log, publicID)
 
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))

@@ -25,6 +25,7 @@ class LiveStreamServiceController extends Controller
         ]);
 
         $liveStream = LiveStream::query()
+            ->with('profile:id,organization_id,qualities')
             ->where('public_id', $validated['public_id'])
             ->first();
 
@@ -52,6 +53,7 @@ class LiveStreamServiceController extends Controller
                 'public_id' => $liveStream->public_id,
                 'settings_version' => $liveStream->settings_version,
                 'hls_url' => $liveStream->hls_url,
+                'qualities' => $liveStream->profile?->qualities ?? [],
             ],
         ]);
     }

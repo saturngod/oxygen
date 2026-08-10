@@ -5,6 +5,7 @@ use App\Enums\LiveStreamStatus;
 use App\Models\LiveStream;
 use App\Models\LiveStreamSession;
 use App\Models\LiveStreamViewerRollup;
+use App\Models\Profile;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
@@ -14,7 +15,13 @@ beforeEach(function () {
 });
 
 test('publish auth accepts valid stream credentials', function () {
-    $liveStream = LiveStream::factory()->create(['stream_key' => 'secret-key']);
+    $profile = Profile::factory()->create(['qualities' => ['360p', '720p']]);
+    $liveStream = LiveStream::factory()
+        ->for($profile->organization)
+        ->create([
+            'profile_id' => $profile->id,
+            'stream_key' => 'secret-key',
+        ]);
 
     $this->withHeader('X-Live-Service-Token', 'live-token')
         ->postJson(route('internal.live.auth-publish'), [
@@ -23,7 +30,8 @@ test('publish auth accepts valid stream credentials', function () {
         ])
         ->assertOk()
         ->assertJsonPath('allowed', true)
-        ->assertJsonPath('stream.id', $liveStream->id);
+        ->assertJsonPath('stream.id', $liveStream->id)
+        ->assertJsonPath('stream.qualities', ['360p', '720p']);
 });
 
 test('publish auth rejects an invalid stream key', function () {

@@ -14,6 +14,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 #[Fillable([
     'organization_id',
     'created_by_id',
+    'profile_id',
     'title',
     'public_id',
     'stream_key',
@@ -54,6 +55,11 @@ class LiveStream extends Model
     public function creator(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by_id');
+    }
+
+    public function profile(): BelongsTo
+    {
+        return $this->belongsTo(Profile::class);
     }
 
     public function sessions(): HasMany

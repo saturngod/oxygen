@@ -9,6 +9,7 @@ use App\Http\Requests\Admin\UpdateLiveStreamSettingsRequest;
 use App\Models\LiveStream;
 use App\Models\LiveStreamSession;
 use App\Models\Organization;
+use App\Models\Profile;
 use App\Services\LiveStreamControlClient;
 use App\Services\LiveStreamEndpointService;
 use Illuminate\Http\RedirectResponse;
@@ -54,6 +55,17 @@ class OrganizationLiveStreamsController extends Controller
 
         return Inertia::render('admin/live-streams/create', [
             'organization' => $this->organizationPayload($organization),
+            'profiles' => $organization->profiles()
+                ->orderByDesc('is_default')
+                ->orderBy('name')
+                ->get(['id', 'name', 'qualities', 'is_default'])
+                ->map(fn (Profile $profile): array => [
+                    'id' => $profile->id,
+                    'name' => $profile->name,
+                    'qualities' => $profile->qualities,
+                    'is_default' => $profile->is_default,
+                ])
+                ->all(),
         ]);
     }
 
@@ -68,6 +80,7 @@ class OrganizationLiveStreamsController extends Controller
 
         $liveStream = $organization->liveStreams()->create([
             'created_by_id' => $request->user()?->getKey(),
+            'profile_id' => $request->validated('profile_id'),
             'title' => $request->string('title'),
             'public_id' => $publicId,
             'stream_key' => $endpoints->generateStreamKey(),

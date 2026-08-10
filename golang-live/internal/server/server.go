@@ -57,6 +57,7 @@ type liveSession struct {
 	sessionID string
 	muxer     *gohlslib.Muxer
 	conn      net.Conn
+	closeFn   func()
 
 	mu     sync.RWMutex
 	closed bool
@@ -71,6 +72,9 @@ func (ls *liveSession) handle(w http.ResponseWriter, r *http.Request) bool {
 	defer ls.mu.RUnlock()
 
 	if ls.closed {
+		return false
+	}
+	if ls.muxer == nil {
 		return false
 	}
 
@@ -90,7 +94,12 @@ func (ls *liveSession) close() {
 	}
 
 	ls.closed = true
-	ls.muxer.Close()
+	if ls.muxer != nil {
+		ls.muxer.Close()
+	}
+	if ls.closeFn != nil {
+		ls.closeFn()
+	}
 }
 
 // disconnect closes the underlying RTMP connection, which unblocks the read
