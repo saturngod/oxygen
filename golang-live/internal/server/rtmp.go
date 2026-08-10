@@ -242,7 +242,8 @@ func (s *Server) cleanupHLSDir(dir string) {
 }
 
 func (s *Server) endRTMPSession(publicID, sessionID string) {
-	snapshot := s.tracker.EndSessionSnapshot(publicID, time.Now())
+	endedAt := time.Now()
+	snapshot := s.tracker.EndSessionSnapshot(publicID, endedAt)
 
 	if snapshot.SessionID == "" {
 		snapshot.SessionID = sessionID
@@ -251,6 +252,8 @@ func (s *Server) endRTMPSession(publicID, sessionID string) {
 	payload := map[string]any{
 		"public_id":         publicID,
 		"session_id":        snapshot.SessionID,
+		"minute":            endedAt.UTC().Truncate(time.Minute).Format(time.RFC3339),
+		"current_viewers":   snapshot.CurrentViewers,
 		"peak_viewers":      snapshot.PeakViewers,
 		"unique_viewers":    snapshot.UniqueViewers,
 		"playlist_requests": snapshot.PlaylistRequests,

@@ -5,6 +5,7 @@ use App\Enums\LiveStreamStatus;
 use App\Enums\OrganizationRole;
 use App\Models\LiveStream;
 use App\Models\LiveStreamSession;
+use App\Models\LiveStreamViewerRollup;
 use App\Models\Organization;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -101,6 +102,46 @@ test('admin can list live streams with latest session stats', function () {
             ->component('admin/live-streams/index')
             ->where('liveStreams.0.current_viewers', 12)
             ->where('liveStreams.0.peak_viewers', 18)
+        );
+});
+
+test('admin live stream detail includes viewer rollups for the active session', function () {
+    [$user, $organization] = liveStreamAdmin();
+    $liveStream = LiveStream::factory()
+        ->for($organization)
+        ->live()
+        ->create();
+
+    $session = LiveStreamSession::factory()
+        ->for($liveStream)
+        ->create();
+
+    $liveStream->forceFill(['active_session_id' => $session->id])->save();
+
+    LiveStreamViewerRollup::factory()->create([
+        'organization_id' => $organization->id,
+        'live_stream_id' => $liveStream->id,
+        'live_stream_session_id' => $session->id,
+        'minute' => now()->subMinute()->startOfMinute(),
+        'current_viewers' => 7,
+    ]);
+
+    LiveStreamViewerRollup::factory()->create([
+        'organization_id' => $organization->id,
+        'live_stream_id' => $liveStream->id,
+        'live_stream_session_id' => $session->id,
+        'minute' => now()->startOfMinute(),
+        'current_viewers' => 12,
+    ]);
+
+    $this->actingAs($user)
+        ->get(route('admin.organizations.live-streams.show', [$organization, $liveStream]))
+        ->assertSuccessful()
+        ->assertInertia(fn ($page) => $page
+            ->component('admin/live-streams/show')
+            ->has('liveStream.viewer_rollups', 2)
+            ->where('liveStream.viewer_rollups.0.current_viewers', 7)
+            ->where('liveStream.viewer_rollups.1.current_viewers', 12)
         );
 });
 

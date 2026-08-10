@@ -119,6 +119,8 @@ class LiveStreamServiceController extends Controller
         $validated = $request->validate([
             'public_id' => ['required', 'string', 'max:255'],
             'session_id' => ['required', 'uuid'],
+            'minute' => ['required_with:current_viewers', 'date'],
+            'current_viewers' => ['required_with:minute', 'integer', 'min:0'],
             'peak_viewers' => ['nullable', 'integer', 'min:0'],
             'unique_viewers' => ['nullable', 'integer', 'min:0'],
             'playlist_requests' => ['nullable', 'integer', 'min:0'],
@@ -127,19 +129,41 @@ class LiveStreamServiceController extends Controller
 
         $liveStream = $this->findStream($validated['public_id']);
         $session = $this->findSession($liveStream, $validated['session_id']);
+        $minute = isset($validated['minute'])
+            ? Carbon::parse($validated['minute'])->startOfMinute()
+            : null;
 
-        DB::transaction(function () use ($liveStream, $session, $validated): void {
-            $session->forceFill([
+        DB::transaction(function () use ($liveStream, $session, $validated, $minute): void {
+            [$lockedLiveStream, $lockedSession] = $this->lockStreamAndSession($liveStream, $session);
+
+            if ($minute !== null && isset($validated['current_viewers'])) {
+                LiveStreamViewerRollup::query()->updateOrCreate(
+                    [
+                        'live_stream_session_id' => $lockedSession->id,
+                        'minute' => $minute,
+                    ],
+                    [
+                        'organization_id' => $lockedLiveStream->organization_id,
+                        'live_stream_id' => $lockedLiveStream->id,
+                        'current_viewers' => $validated['current_viewers'],
+                        'unique_viewers_seen' => max($lockedSession->unique_viewers, (int) ($validated['unique_viewers'] ?? 0)),
+                        'playlist_requests' => max($lockedSession->playlist_requests, (int) ($validated['playlist_requests'] ?? 0)),
+                        'segment_requests' => max($lockedSession->segment_requests, (int) ($validated['segment_requests'] ?? 0)),
+                    ],
+                );
+            }
+
+            $lockedSession->forceFill([
                 'status' => LiveStreamSessionStatus::Ended,
-                'peak_viewers' => max($session->peak_viewers, (int) ($validated['peak_viewers'] ?? 0)),
-                'unique_viewers' => max($session->unique_viewers, (int) ($validated['unique_viewers'] ?? 0)),
-                'playlist_requests' => max($session->playlist_requests, (int) ($validated['playlist_requests'] ?? 0)),
-                'segment_requests' => max($session->segment_requests, (int) ($validated['segment_requests'] ?? 0)),
+                'peak_viewers' => max($lockedSession->peak_viewers, (int) ($validated['peak_viewers'] ?? 0)),
+                'unique_viewers' => max($lockedSession->unique_viewers, (int) ($validated['unique_viewers'] ?? 0)),
+                'playlist_requests' => max($lockedSession->playlist_requests, (int) ($validated['playlist_requests'] ?? 0)),
+                'segment_requests' => max($lockedSession->segment_requests, (int) ($validated['segment_requests'] ?? 0)),
                 'current_viewers' => 0,
-                'ended_at' => $session->ended_at ?? now(),
+                'ended_at' => $lockedSession->ended_at ?? now(),
             ])->save();
 
-            $this->closeStreamIfActive($liveStream, $session, LiveStreamStatus::Offline);
+            $this->closeLockedStreamIfActive($lockedLiveStream, $lockedSession, LiveStreamStatus::Offline);
         });
 
         return response()->json(['ok' => true]);
@@ -159,14 +183,16 @@ class LiveStreamServiceController extends Controller
         $session = $this->findSession($liveStream, $validated['session_id']);
 
         DB::transaction(function () use ($liveStream, $session, $validated): void {
-            $session->forceFill([
+            [$lockedLiveStream, $lockedSession] = $this->lockStreamAndSession($liveStream, $session);
+
+            $lockedSession->forceFill([
                 'status' => LiveStreamSessionStatus::Failed,
                 'error_message' => $validated['error_message'] ?? null,
                 'current_viewers' => 0,
-                'ended_at' => $session->ended_at ?? now(),
+                'ended_at' => $lockedSession->ended_at ?? now(),
             ])->save();
 
-            $this->closeStreamIfActive($liveStream, $session, LiveStreamStatus::Failed);
+            $this->closeLockedStreamIfActive($lockedLiveStream, $lockedSession, LiveStreamStatus::Failed);
         });
 
         return response()->json(['ok' => true]);
@@ -232,23 +258,25 @@ class LiveStreamServiceController extends Controller
         $liveStream = $this->findStream($validated['public_id']);
         $session = $this->findSession($liveStream, $validated['session_id']);
 
-        if (in_array($session->status, [LiveStreamSessionStatus::Ended, LiveStreamSessionStatus::Failed], true)) {
-            return response()->json(['ok' => true]);
-        }
-
         $minute = isset($validated['minute'])
             ? Carbon::parse($validated['minute'])->startOfMinute()
             : now()->startOfMinute();
 
         DB::transaction(function () use ($liveStream, $session, $validated, $minute): void {
+            [$lockedLiveStream, $lockedSession] = $this->lockStreamAndSession($liveStream, $session);
+
+            if (in_array($lockedSession->status, [LiveStreamSessionStatus::Ended, LiveStreamSessionStatus::Failed], true)) {
+                return;
+            }
+
             LiveStreamViewerRollup::query()->updateOrCreate(
                 [
-                    'live_stream_session_id' => $session->id,
+                    'live_stream_session_id' => $lockedSession->id,
                     'minute' => $minute,
                 ],
                 [
-                    'organization_id' => $liveStream->organization_id,
-                    'live_stream_id' => $liveStream->id,
+                    'organization_id' => $lockedLiveStream->organization_id,
+                    'live_stream_id' => $lockedLiveStream->id,
                     'current_viewers' => $validated['current_viewers'],
                     'unique_viewers_seen' => $validated['unique_viewers_seen'],
                     'playlist_requests' => $validated['playlist_requests'],
@@ -256,12 +284,12 @@ class LiveStreamServiceController extends Controller
                 ],
             );
 
-            $session->forceFill([
+            $lockedSession->forceFill([
                 'current_viewers' => $validated['current_viewers'],
-                'peak_viewers' => max($session->peak_viewers, (int) $validated['current_viewers']),
-                'unique_viewers' => max($session->unique_viewers, (int) $validated['unique_viewers_seen']),
-                'playlist_requests' => max($session->playlist_requests, (int) $validated['playlist_requests']),
-                'segment_requests' => max($session->segment_requests, (int) $validated['segment_requests']),
+                'peak_viewers' => max($lockedSession->peak_viewers, (int) $validated['current_viewers']),
+                'unique_viewers' => max($lockedSession->unique_viewers, (int) $validated['unique_viewers_seen']),
+                'playlist_requests' => max($lockedSession->playlist_requests, (int) $validated['playlist_requests']),
+                'segment_requests' => max($lockedSession->segment_requests, (int) $validated['segment_requests']),
             ])->save();
         });
 
@@ -284,22 +312,40 @@ class LiveStreamServiceController extends Controller
      * the active one. A late callback for a superseded session must update its own
      * row but must not knock a newer, currently-live session offline.
      */
-    private function closeStreamIfActive(LiveStream $liveStream, LiveStreamSession $session, LiveStreamStatus $status): void
-    {
-        $locked = LiveStream::query()
-            ->whereKey($liveStream->getKey())
-            ->lockForUpdate()
-            ->firstOrFail();
-
-        if ($locked->active_session_id !== $session->id) {
+    private function closeLockedStreamIfActive(
+        LiveStream $liveStream,
+        LiveStreamSession $session,
+        LiveStreamStatus $status,
+    ): void {
+        if ($liveStream->active_session_id !== $session->id) {
             return;
         }
 
-        $locked->forceFill([
+        $liveStream->forceFill([
             'status' => $status,
             'active_session_id' => null,
             'last_ended_at' => $session->ended_at,
         ])->save();
+    }
+
+    /**
+     * @return array{LiveStream, LiveStreamSession}
+     */
+    private function lockStreamAndSession(
+        LiveStream $liveStream,
+        LiveStreamSession $session,
+    ): array {
+        $lockedLiveStream = LiveStream::query()
+            ->whereKey($liveStream->id)
+            ->lockForUpdate()
+            ->firstOrFail();
+
+        $lockedSession = $lockedLiveStream->sessions()
+            ->whereKey($session->id)
+            ->lockForUpdate()
+            ->firstOrFail();
+
+        return [$lockedLiveStream, $lockedSession];
     }
 
     private function findStream(string $publicId): LiveStream

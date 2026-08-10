@@ -4,6 +4,7 @@ use App\Enums\LiveStreamSessionStatus;
 use App\Enums\LiveStreamStatus;
 use App\Models\LiveStream;
 use App\Models\LiveStreamSession;
+use App\Models\LiveStreamViewerRollup;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 
 uses(RefreshDatabase::class);
@@ -121,10 +122,22 @@ test('service callbacks track live session and viewer rollups', function () {
         ->and($session->playlist_requests)->toBe(44)
         ->and($session->segment_requests)->toBe(91);
 
+    $rollup = LiveStreamViewerRollup::query()->sole();
+    expect($rollup->organization_id)->toBe($liveStream->organization_id)
+        ->and($rollup->live_stream_id)->toBe($liveStream->id)
+        ->and($rollup->live_stream_session_id)->toBe($sessionId)
+        ->and($rollup->minute->toIso8601String())->toBe('2026-05-22T18:15:00+00:00')
+        ->and($rollup->current_viewers)->toBe(12)
+        ->and($rollup->unique_viewers_seen)->toBe(18)
+        ->and($rollup->playlist_requests)->toBe(44)
+        ->and($rollup->segment_requests)->toBe(91);
+
     $this->withHeader('X-Live-Service-Token', 'live-token')
         ->postJson(route('internal.live.session-ended'), [
             'public_id' => $liveStream->public_id,
             'session_id' => $sessionId,
+            'minute' => '2026-05-22T18:15:45Z',
+            'current_viewers' => 4,
             'peak_viewers' => 20,
             'unique_viewers' => 33,
             'playlist_requests' => 100,
@@ -139,7 +152,10 @@ test('service callbacks track live session and viewer rollups', function () {
         ->and($liveStream->active_session_id)->toBeNull()
         ->and($session->status)->toBe(LiveStreamSessionStatus::Ended)
         ->and($session->peak_viewers)->toBe(20)
-        ->and($session->unique_viewers)->toBe(33);
+        ->and($session->unique_viewers)->toBe(33)
+        ->and(LiveStreamViewerRollup::query()->count())->toBe(1)
+        ->and($rollup->fresh()->current_viewers)->toBe(4)
+        ->and($rollup->minute->toIso8601String())->toBe('2026-05-22T18:15:00+00:00');
 
     $this->withHeader('X-Live-Service-Token', 'live-token')
         ->postJson(route('internal.live.viewer-snapshot'), [
@@ -154,6 +170,54 @@ test('service callbacks track live session and viewer rollups', function () {
 
     expect($session->fresh()->current_viewers)->toBe(0)
         ->and($session->playlist_requests)->toBe(100);
+});
+
+test('session end persists a final viewer rollup without a periodic snapshot', function () {
+    $liveStream = LiveStream::factory()->create();
+
+    $sessionId = $this->withHeader('X-Live-Service-Token', 'live-token')
+        ->postJson(route('internal.live.session-started'), [
+            'public_id' => $liveStream->public_id,
+            'external_id' => 'short-session',
+        ])
+        ->assertOk()
+        ->json('session_id');
+
+    expect(LiveStreamViewerRollup::query()->count())->toBe(0);
+
+    $payload = [
+        'public_id' => $liveStream->public_id,
+        'session_id' => $sessionId,
+        'minute' => '2026-08-09T18:24:37Z',
+        'current_viewers' => 0,
+        'peak_viewers' => 2,
+        'unique_viewers' => 2,
+        'playlist_requests' => 3,
+        'segment_requests' => 7,
+    ];
+
+    $this->withHeader('X-Live-Service-Token', 'live-token')
+        ->postJson(route('internal.live.session-ended'), $payload)
+        ->assertOk();
+
+    $rollup = LiveStreamViewerRollup::query()->sole();
+    expect($rollup->organization_id)->toBe($liveStream->organization_id)
+        ->and($rollup->live_stream_id)->toBe($liveStream->id)
+        ->and($rollup->live_stream_session_id)->toBe($sessionId)
+        ->and($rollup->minute->toIso8601String())->toBe('2026-08-09T18:24:00+00:00')
+        ->and($rollup->current_viewers)->toBe(0)
+        ->and($rollup->unique_viewers_seen)->toBe(2)
+        ->and($rollup->playlist_requests)->toBe(3)
+        ->and($rollup->segment_requests)->toBe(7)
+        ->and($liveStream->fresh()->status)->toBe(LiveStreamStatus::Offline)
+        ->and(LiveStreamSession::query()->findOrFail($sessionId)->status)->toBe(LiveStreamSessionStatus::Ended);
+
+    $this->withHeader('X-Live-Service-Token', 'live-token')
+        ->postJson(route('internal.live.session-ended'), $payload)
+        ->assertOk();
+
+    expect(LiveStreamViewerRollup::query()->count())->toBe(1)
+        ->and(LiveStreamViewerRollup::query()->sole()->id)->toBe($rollup->id);
 });
 
 test('session start callbacks are idempotent by external id', function () {
@@ -206,7 +270,8 @@ test('late session start retries return the original completed session', functio
     expect($liveStream->sessions()->count())->toBe(1)
         ->and($liveStream->fresh()->status)->toBe(LiveStreamStatus::Offline)
         ->and($liveStream->active_session_id)->toBeNull()
-        ->and(LiveStreamSession::query()->findOrFail($sessionId)->status)->toBe(LiveStreamSessionStatus::Ended);
+        ->and(LiveStreamSession::query()->findOrFail($sessionId)->status)->toBe(LiveStreamSessionStatus::Ended)
+        ->and(LiveStreamViewerRollup::query()->count())->toBe(0);
 });
 
 test('session start rejects a different external id while a stream is active', function () {

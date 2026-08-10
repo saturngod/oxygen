@@ -33,15 +33,24 @@ import {
     show as showOrgLiveStream,
 } from '@/routes/admin/organizations/live-streams';
 
+type HlsErrorData = {
+    details?: string;
+    fatal?: boolean;
+};
+
 type HlsInstance = {
-    loadSource: (src: string) => void;
     attachMedia: (media: HTMLMediaElement) => void;
-    on: (event: string, callback: () => void) => void;
     destroy: () => void;
+    loadSource: (src: string) => void;
+    on: (
+        event: string,
+        callback: (event: string, data: HlsErrorData) => void,
+    ) => void;
 };
 
 type HlsConstructor = {
     Events: {
+        ERROR: string;
         MANIFEST_PARSED: string;
     };
     isSupported: () => boolean;
@@ -345,9 +354,10 @@ export default function ShowLiveStream({ organization, liveStream }: Props) {
             ],
         },
         {
-            autoStart:
-                liveStream.status === 'live' ||
-                liveStream.status === 'restarting',
+            // Keep polling while the detail page is open so an idle stream can
+            // transition to live and begin receiving viewer rollups without a
+            // manual refresh. Disabled streams cannot transition back to live.
+            autoStart: liveStream.status !== 'disabled',
             keepAlive: false,
         },
     );

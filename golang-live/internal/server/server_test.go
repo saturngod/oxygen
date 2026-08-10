@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -180,6 +181,115 @@ func TestHLSServingUsesStableFingerprintWithoutCookies(t *testing.T) {
 	}
 	if snapshots[0].PlaylistRequests != 3 {
 		t.Fatalf("expected three playlist requests, got %d", snapshots[0].PlaylistRequests)
+	}
+}
+
+func TestFlushSnapshotsPostsViewerRollupToLaravel(t *testing.T) {
+	const sessionID = "0198d846-18e7-7f3c-b91f-ce49f2230ca1"
+	minute := time.Date(2026, time.August, 9, 18, 24, 37, 0, time.UTC)
+
+	srv := New(config.Config{
+		LaravelURL:        "http://laravel.test",
+		ServiceToken:      "live-token",
+		ViewerTTL:         time.Minute,
+		RollupInterval:    time.Hour,
+		MaxTrackedViewers: 100,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv.tracker.StartSession("public-1", sessionID)
+	srv.tracker.Observe("public-1", "viewer-1", "index.m3u8", minute.Add(-10*time.Second))
+
+	var payload ViewerSnapshotRequest
+	srv.laravel.http = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/internal/live/viewer-snapshot" {
+			t.Fatalf("unexpected callback path %s", r.URL.Path)
+		}
+		if r.Header.Get("X-Live-Service-Token") != "live-token" {
+			t.Fatal("expected live service token header")
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("")),
+		}, nil
+	})}
+
+	srv.flushSnapshots(context.Background(), minute)
+
+	if payload.PublicID != "public-1" || payload.SessionID != sessionID {
+		t.Fatalf("unexpected stream identity: %+v", payload)
+	}
+	if payload.Minute != "2026-08-09T18:24:00Z" {
+		t.Fatalf("expected minute-aligned snapshot, got %s", payload.Minute)
+	}
+	if payload.CurrentViewers != 1 || payload.UniqueViewers != 1 || payload.PlaylistRequests != 1 || payload.SegmentRequests != 0 {
+		t.Fatalf("unexpected viewer metrics: %+v", payload)
+	}
+}
+
+func TestEndRTMPSessionEnqueuesFinalViewerSample(t *testing.T) {
+	const sessionID = "0198d846-18e7-7f3c-b91f-ce49f2230ca1"
+	callbackRoot := t.TempDir()
+	srv := New(config.Config{
+		CallbackRoot:      callbackRoot,
+		ViewerTTL:         time.Minute,
+		RollupInterval:    time.Hour,
+		MaxTrackedViewers: 100,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv.tracker.StartSession("public-1", sessionID)
+	srv.tracker.Observe("public-1", "viewer-1", "index.m3u8", time.Now())
+
+	srv.endRTMPSession("public-1", sessionID)
+
+	entries, err := os.ReadDir(callbackRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one session end callback, got %d", len(entries))
+	}
+
+	body, err := os.ReadFile(filepath.Join(callbackRoot, entries[0].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var envelope callbackEnvelope
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Path != "/internal/live/session-ended" {
+		t.Fatalf("unexpected callback path %s", envelope.Path)
+	}
+
+	var payload struct {
+		SessionID        string `json:"session_id"`
+		Minute           string `json:"minute"`
+		CurrentViewers   int    `json:"current_viewers"`
+		PeakViewers      int    `json:"peak_viewers"`
+		UniqueViewers    int    `json:"unique_viewers"`
+		PlaylistRequests int64  `json:"playlist_requests"`
+		SegmentRequests  int64  `json:"segment_requests"`
+	}
+	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.SessionID != sessionID || payload.CurrentViewers != 1 || payload.PeakViewers != 1 || payload.UniqueViewers != 1 {
+		t.Fatalf("unexpected final viewer sample: %+v", payload)
+	}
+	if payload.PlaylistRequests != 1 || payload.SegmentRequests != 0 {
+		t.Fatalf("unexpected final viewer sample: %+v", payload)
+	}
+
+	minute, err := time.Parse(time.RFC3339, payload.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !minute.Equal(minute.Truncate(time.Minute)) {
+		t.Fatalf("expected minute-aligned final sample, got %s", payload.Minute)
 	}
 }
 
