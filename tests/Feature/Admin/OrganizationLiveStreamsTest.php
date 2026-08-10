@@ -15,6 +15,10 @@ use Illuminate\Support\Facades\Http;
 
 uses(RefreshDatabase::class);
 
+beforeEach(function () {
+    $this->withoutVite();
+});
+
 function liveStreamAdmin(): array
 {
     $user = User::factory()->create(['email_verified_at' => now()]);
@@ -143,7 +147,7 @@ test('admin can list live streams with latest session stats', function () {
         );
 });
 
-test('admin live stream detail includes viewer rollups for the active session', function () {
+test('admin can view hourly viewer analytics with peak values per bucket', function () {
     [$user, $organization] = liveStreamAdmin();
     $liveStream = LiveStream::factory()
         ->for($organization)
@@ -152,7 +156,11 @@ test('admin live stream detail includes viewer rollups for the active session', 
 
     $session = LiveStreamSession::factory()
         ->for($liveStream)
-        ->create();
+        ->create([
+            'unique_viewers' => 9,
+            'playlist_requests' => 40,
+            'segment_requests' => 60,
+        ]);
 
     $liveStream->forceFill(['active_session_id' => $session->id])->save();
 
@@ -160,7 +168,7 @@ test('admin live stream detail includes viewer rollups for the active session', 
         'organization_id' => $organization->id,
         'live_stream_id' => $liveStream->id,
         'live_stream_session_id' => $session->id,
-        'minute' => now()->subMinute()->startOfMinute(),
+        'minute' => now()->subHour()->startOfHour()->addMinutes(10),
         'current_viewers' => 7,
     ]);
 
@@ -168,19 +176,119 @@ test('admin live stream detail includes viewer rollups for the active session', 
         'organization_id' => $organization->id,
         'live_stream_id' => $liveStream->id,
         'live_stream_session_id' => $session->id,
-        'minute' => now()->startOfMinute(),
+        'minute' => now()->startOfHour()->addMinutes(5),
         'current_viewers' => 12,
     ]);
 
     $this->actingAs($user)
-        ->get(route('admin.organizations.live-streams.show', [$organization, $liveStream]))
+        ->get(route('admin.organizations.live-streams.viewer', [$organization, $liveStream]))
         ->assertSuccessful()
         ->assertInertia(fn ($page) => $page
-            ->component('admin/live-streams/show')
-            ->has('liveStream.viewer_rollups', 2)
-            ->where('liveStream.viewer_rollups.0.current_viewers', 7)
-            ->where('liveStream.viewer_rollups.1.current_viewers', 12)
+            ->component('admin/live-streams/viewer')
+            ->where('period', 'day')
+            ->where('analytics.granularity', 'hour')
+            ->has('analytics.points', 24)
+            ->where('analytics.points.22.value', 7)
+            ->where('analytics.points.23.value', 12)
+            ->where('analytics.summary.peak_viewers', 12)
+            ->where('analytics.summary.broadcasts', 1)
+            ->where('analytics.summary.viewer_visits', 9)
+            ->where('analytics.summary.playback_requests', 100)
+            ->missing('liveStream.stream_key')
+            ->missing('liveStream.rtmp_url')
         );
+});
+
+test('monthly viewer analytics uses the peak minute sample for each day', function () {
+    [$user, $organization] = liveStreamAdmin();
+    $liveStream = LiveStream::factory()->for($organization)->create();
+    $session = LiveStreamSession::factory()->for($liveStream)->create();
+    $sampleDay = now()->subDays(20)->startOfDay();
+
+    foreach ([8, 14] as $index => $viewers) {
+        LiveStreamViewerRollup::factory()->create([
+            'organization_id' => $organization->id,
+            'live_stream_id' => $liveStream->id,
+            'live_stream_session_id' => $session->id,
+            'minute' => $sampleDay->addHours($index + 1),
+            'current_viewers' => $viewers,
+        ]);
+    }
+
+    $this->actingAs($user)
+        ->get(route('admin.organizations.live-streams.viewer', [
+            'organization' => $organization,
+            'liveStream' => $liveStream,
+            'period' => 'month',
+        ]))
+        ->assertSuccessful()
+        ->assertInertia(fn ($page) => $page
+            ->component('admin/live-streams/viewer')
+            ->where('period', 'month')
+            ->where('analytics.granularity', 'day')
+            ->has('analytics.points', 30)
+            ->where('analytics.points.9.value', 14)
+            ->where('analytics.summary.peak_viewers', 14)
+        );
+});
+
+test('yearly viewer analytics remains available from retained session summaries', function () {
+    [$user, $organization] = liveStreamAdmin();
+    $liveStream = LiveStream::factory()->for($organization)->create();
+
+    LiveStreamSession::factory()->for($liveStream)->create([
+        'started_at' => now()->subMonthsNoOverflow(10)->startOfMonth()->addDay(),
+        'peak_viewers' => 31,
+        'unique_viewers' => 18,
+        'playlist_requests' => 70,
+        'segment_requests' => 130,
+    ]);
+
+    LiveStreamSession::factory()->for($liveStream)->create([
+        'started_at' => now()->startOfMonth()->addDay(),
+        'peak_viewers' => 9,
+        'unique_viewers' => 6,
+        'playlist_requests' => 20,
+        'segment_requests' => 30,
+    ]);
+
+    $this->actingAs($user)
+        ->get(route('admin.organizations.live-streams.viewer', [
+            'organization' => $organization,
+            'liveStream' => $liveStream,
+            'period' => 'year',
+        ]))
+        ->assertSuccessful()
+        ->assertInertia(fn ($page) => $page
+            ->where('period', 'year')
+            ->where('analytics.granularity', 'month')
+            ->has('analytics.points', 12)
+            ->where('analytics.points.1.value', 31)
+            ->where('analytics.points.11.value', 9)
+            ->where('analytics.summary.peak_viewers', 31)
+            ->where('analytics.summary.broadcasts', 2)
+            ->where('analytics.summary.viewer_visits', 24)
+            ->where('analytics.summary.playback_requests', 250)
+        );
+});
+
+test('viewer analytics rejects invalid periods and scopes streams to the organization', function () {
+    [$user, $organization] = liveStreamAdmin();
+    $liveStream = LiveStream::factory()->for($organization)->create();
+    $otherOrganization = Organization::factory()->create();
+    $otherStream = LiveStream::factory()->for($otherOrganization)->create();
+
+    $this->actingAs($user)
+        ->get(route('admin.organizations.live-streams.viewer', [
+            'organization' => $organization,
+            'liveStream' => $liveStream,
+            'period' => 'week',
+        ]))
+        ->assertSessionHasErrors('period');
+
+    $this->actingAs($user)
+        ->get(route('admin.organizations.live-streams.viewer', [$organization, $otherStream]))
+        ->assertNotFound();
 });
 
 test('admin can update a live stream title without requiring restart', function () {

@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Admin\OrganizationLiveStreamsController;
+use App\Http\Controllers\Admin\OrganizationLiveStreamViewerController;
 use App\Http\Controllers\Admin\OrganizationProfilesController;
 use App\Http\Controllers\Admin\OrganizationSettingsController;
 use App\Http\Controllers\Admin\OrganizationUsersController;
@@ -59,6 +60,9 @@ Route::middleware(['auth', 'verified'])->group(function () {
         Route::get('live-streams/create', [OrganizationLiveStreamsController::class, 'create'])->name('admin.organizations.live-streams.create');
         Route::post('live-streams', [OrganizationLiveStreamsController::class, 'store'])->name('admin.organizations.live-streams.store');
         Route::get('live-streams/{liveStream}', [OrganizationLiveStreamsController::class, 'show'])->name('admin.organizations.live-streams.show');
+        Route::get('live-streams/{liveStream}/viewer', OrganizationLiveStreamViewerController::class)
+            ->scopeBindings()
+            ->name('admin.organizations.live-streams.viewer');
         Route::put('live-streams/{liveStream}', [OrganizationLiveStreamsController::class, 'update'])->name('admin.organizations.live-streams.update');
         Route::post('live-streams/{liveStream}/rotate-key', [OrganizationLiveStreamsController::class, 'rotateKey'])->name('admin.organizations.live-streams.rotate-key');
         Route::post('live-streams/{liveStream}/restart', [OrganizationLiveStreamsController::class, 'restart'])->name('admin.organizations.live-streams.restart');

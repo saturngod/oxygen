@@ -1,5 +1,6 @@
-import { Form, Head, setLayoutProps, usePoll } from '@inertiajs/react';
+import { Form, Head, Link, setLayoutProps, usePoll } from '@inertiajs/react';
 import {
+    ChartNoAxesCombined,
     Copy,
     Eye,
     KeyRound,
@@ -31,6 +32,7 @@ import {
 import {
     index as indexOrgLiveStreams,
     show as showOrgLiveStream,
+    viewer as viewOrgLiveStreamAnalytics,
 } from '@/routes/admin/organizations/live-streams';
 
 type HlsErrorData = {
@@ -89,14 +91,6 @@ type StreamSession = {
     error_message: string | null;
 };
 
-type ViewerRollup = {
-    minute: string | null;
-    current_viewers: number;
-    unique_viewers_seen: number;
-    playlist_requests: number;
-    segment_requests: number;
-};
-
 type LiveStream = {
     id: string;
     title: string;
@@ -113,7 +107,6 @@ type LiveStream = {
     last_ended_at: string | null;
     current_session: StreamSession | null;
     recent_sessions: StreamSession[];
-    viewer_rollups: ViewerRollup[];
 };
 
 type Props = {
@@ -305,40 +298,6 @@ function LivePlayer({ src, isLive }: { src: string; isLive: boolean }) {
     );
 }
 
-function ViewerChart({ rollups }: { rollups: ViewerRollup[] }) {
-    const max = Math.max(1, ...rollups.map((rollup) => rollup.current_viewers));
-
-    if (rollups.length === 0) {
-        return (
-            <div className="flex h-28 items-center justify-center rounded-lg border border-dashed text-xs text-muted-foreground">
-                No viewer samples yet.
-            </div>
-        );
-    }
-
-    return (
-        <div className="flex h-28 items-stretch gap-1 rounded-lg border p-2">
-            {rollups.map((rollup, index) => (
-                <div
-                    key={rollup.minute ?? index}
-                    className="flex h-full min-w-2 flex-1 items-end"
-                    title={`${formatDate(rollup.minute)} - ${rollup.current_viewers} viewers`}
-                >
-                    <div
-                        className="w-full rounded-sm bg-primary/70"
-                        style={{
-                            height: `${Math.max(
-                                6,
-                                (rollup.current_viewers / max) * 100,
-                            )}%`,
-                        }}
-                    />
-                </div>
-            ))}
-        </div>
-    );
-}
-
 export default function ShowLiveStream({ organization, liveStream }: Props) {
     usePoll(
         5000,
@@ -415,7 +374,20 @@ export default function ShowLiveStream({ organization, liveStream }: Props) {
                         title={liveStream.title}
                         description="RTMP ingest credentials, live playback, and stream reporting."
                     />
-                    <div className="flex flex-wrap gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                        <Button asChild variant="outline">
+                            <Link
+                                href={
+                                    viewOrgLiveStreamAnalytics({
+                                        organization: organization.id,
+                                        liveStream: liveStream.id,
+                                    }).url
+                                }
+                            >
+                                <ChartNoAxesCombined data-icon="inline-start" />
+                                Viewer analytics
+                            </Link>
+                        </Button>
                         <Badge className={statusClasses[liveStream.status]}>
                             {liveStream.status_label}
                         </Badge>
@@ -470,17 +442,6 @@ export default function ShowLiveStream({ organization, liveStream }: Props) {
                                 );
                             })}
                         </div>
-
-                        <Card>
-                            <CardHeader>
-                                <CardTitle>Viewer history</CardTitle>
-                            </CardHeader>
-                            <CardContent>
-                                <ViewerChart
-                                    rollups={liveStream.viewer_rollups}
-                                />
-                            </CardContent>
-                        </Card>
                     </div>
 
                     <div className="grid content-start gap-4">

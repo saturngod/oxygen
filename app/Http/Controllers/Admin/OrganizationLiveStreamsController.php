@@ -111,25 +111,6 @@ class OrganizationLiveStreamsController extends Controller
             ->map(fn (LiveStreamSession $session): array => $this->sessionPayload($session))
             ->all();
 
-        $rollupSessionId = $currentSession?->id
-            ?? $liveStream->sessions()->latest('started_at')->value('id');
-
-        $rollups = $liveStream->viewerRollups()
-            ->when($rollupSessionId, fn ($query) => $query->where('live_stream_session_id', $rollupSessionId))
-            ->latest('minute')
-            ->limit(60)
-            ->get()
-            ->sortBy('minute')
-            ->values()
-            ->map(fn ($rollup): array => [
-                'minute' => $rollup->minute?->toIso8601String(),
-                'current_viewers' => $rollup->current_viewers,
-                'unique_viewers_seen' => $rollup->unique_viewers_seen,
-                'playlist_requests' => $rollup->playlist_requests,
-                'segment_requests' => $rollup->segment_requests,
-            ])
-            ->all();
-
         return Inertia::render('admin/live-streams/show', [
             'organization' => $this->organizationPayload($organization),
             'liveStream' => [
@@ -152,7 +133,6 @@ class OrganizationLiveStreamsController extends Controller
                 'last_ended_at' => $liveStream->last_ended_at?->toIso8601String(),
                 'current_session' => $currentSession ? $this->sessionPayload($currentSession) : null,
                 'recent_sessions' => $recentSessions,
-                'viewer_rollups' => $rollups,
             ],
         ]);
     }
