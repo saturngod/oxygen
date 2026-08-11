@@ -7,7 +7,7 @@ Go service for the live-streaming runtime. Laravel remains the control plane; th
 - publish auth proxy into Laravel
 - live session callbacks into Laravel
 - HLS file serving
-- viewer presence and minute snapshot reporting
+- viewer presence and durable analytics event reporting
 
 This module intentionally does not share code with `golang-queue`: the queue worker is batch VOD work, while this service is long-running live network work.
 
@@ -27,6 +27,10 @@ go run ./cmd/live
 | `FFMPEG_BIN` | `ffmpeg` | ffmpeg executable used for adaptive live transcoding |
 | `FFMPEG_VIDEO_CODEC` | `libx264` | ffmpeg video encoder for live renditions |
 | `LIVE_CALLBACK_ROOT` | `/tmp/oxygen-live/callbacks` | Persistent outbox for terminal Laravel callbacks |
+| `ANALYTICS_URL` | empty | Private analytics API base URL; blank disables event delivery |
+| `ANALYTICS_INGEST_TOKEN` | empty | Bearer token for analytics ingestion |
+| `ANALYTICS_OUTBOX_ROOT` | `/tmp/oxygen-live/analytics-outbox` | Persistent outbox for analytics events |
+| `ANALYTICS_BATCH_SIZE` | `100` | Maximum event count per durable analytics file |
 | `LARAVEL_URL` | `http://127.0.0.1:8000` | Laravel app URL for internal callbacks |
 | `LIVE_SERVICE_TOKEN` | empty | Shared token sent to Laravel `internal/live/*` routes |
 | `LIVE_CONTROL_TOKEN` | empty | Bearer token required for Laravel control requests to this service |

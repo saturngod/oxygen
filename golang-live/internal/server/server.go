@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/bluenviron/gohlslib/v2"
+	"github.com/google/uuid"
 
 	"oxygen/live/internal/config"
 )
@@ -32,11 +33,12 @@ func validPublicID(id string) bool {
 }
 
 type Server struct {
-	cfg     config.Config
-	log     *slog.Logger
-	laravel *LaravelClient
-	tracker *Tracker
-	outbox  *CallbackOutbox
+	cfg             config.Config
+	log             *slog.Logger
+	laravel         *LaravelClient
+	tracker         *Tracker
+	outbox          *CallbackOutbox
+	analyticsOutbox *AnalyticsOutbox
 
 	mu         sync.RWMutex
 	streams    map[string]*liveSession
@@ -118,17 +120,22 @@ func New(cfg config.Config, log *slog.Logger) *Server {
 		cfg.MaxRTMPConnections = 1000
 	}
 	laravel := NewLaravelClient(cfg)
+	var analyticsOutbox *AnalyticsOutbox
+	if cfg.AnalyticsURL != "" && cfg.AnalyticsToken != "" {
+		analyticsOutbox = NewAnalyticsOutbox(cfg.AnalyticsOutboxRoot, NewAnalyticsClient(cfg), log)
+	}
 
 	return &Server{
-		cfg:        cfg,
-		log:        log,
-		laravel:    laravel,
-		tracker:    NewTracker(cfg.ViewerTTL, cfg.MaxTrackedViewers),
-		outbox:     NewCallbackOutbox(cfg.CallbackRoot, laravel, log),
-		streams:    make(map[string]*liveSession),
-		publishers: make(map[string]struct{}),
-		rtmpConns:  make(map[net.Conn]struct{}),
-		rtmpSlots:  make(chan struct{}, cfg.MaxRTMPConnections),
+		cfg:             cfg,
+		log:             log,
+		laravel:         laravel,
+		tracker:         NewTracker(cfg.ViewerTTL, cfg.MaxTrackedViewers),
+		outbox:          NewCallbackOutbox(cfg.CallbackRoot, laravel, log),
+		analyticsOutbox: analyticsOutbox,
+		streams:         make(map[string]*liveSession),
+		publishers:      make(map[string]struct{}),
+		rtmpConns:       make(map[net.Conn]struct{}),
+		rtmpSlots:       make(chan struct{}, cfg.MaxRTMPConnections),
 	}
 }
 
@@ -138,12 +145,25 @@ func (s *Server) Prepare() error {
 	}
 
 	s.outboxHealthy.Store(true)
+	if s.analyticsOutbox != nil {
+		if err := s.analyticsOutbox.Prepare(); err != nil {
+			s.log.Error("analytics outbox preparation failed", "err", err)
+			// Analytics is deliberately fail-open for media delivery. The live
+			// service remains healthy while an operator repairs the outbox.
+		}
+	}
 
 	return nil
 }
 
 func (s *Server) RunCallbacks(ctx context.Context) {
 	s.outbox.Run(ctx)
+}
+
+func (s *Server) RunAnalyticsOutbox(ctx context.Context) {
+	if s.analyticsOutbox != nil {
+		s.analyticsOutbox.Run(ctx)
+	}
 }
 
 func (s *Server) Routes() http.Handler {
@@ -456,25 +476,91 @@ func (s *Server) removeLiveSession(publicID string, session *liveSession) {
 
 func (s *Server) flushSnapshots(ctx context.Context, now time.Time) {
 	minute := now.UTC().Truncate(time.Minute).Format(time.RFC3339)
+	snapshots := s.tracker.Snapshots(now)
+	if s.analyticsOutbox == nil {
+		for _, snapshot := range snapshots {
+			if snapshot.SessionID == "" {
+				continue
+			}
 
-	for _, snapshot := range s.tracker.Snapshots(now) {
-		if snapshot.SessionID == "" {
-			continue
-		}
-
-		err := s.laravel.Post(ctx, "/internal/live/viewer-snapshot", ViewerSnapshotRequest{
-			PublicID:         snapshot.PublicID,
-			SessionID:        snapshot.SessionID,
-			Minute:           minute,
-			CurrentViewers:   snapshot.CurrentViewers,
-			UniqueViewers:    snapshot.UniqueViewers,
-			PlaylistRequests: snapshot.PlaylistRequests,
-			SegmentRequests:  snapshot.SegmentRequests,
-		}, nil)
-		if err != nil {
-			s.log.Warn("viewer snapshot failed", "err", err, "public_id", snapshot.PublicID)
+			err := s.laravel.Post(ctx, "/internal/live/viewer-snapshot", ViewerSnapshotRequest{
+				PublicID:         snapshot.PublicID,
+				SessionID:        snapshot.SessionID,
+				Minute:           minute,
+				CurrentViewers:   snapshot.CurrentViewers,
+				UniqueViewers:    snapshot.UniqueViewers,
+				PlaylistRequests: snapshot.PlaylistRequests,
+				SegmentRequests:  snapshot.SegmentRequests,
+			}, nil)
+			if err != nil {
+				s.log.Warn("viewer snapshot failed", "err", err, "public_id", snapshot.PublicID)
+			}
 		}
 	}
+
+	if s.analyticsOutbox == nil {
+		return
+	}
+	prepared := s.tracker.PrepareAnalyticsBatch(now)
+	for offset := 0; offset < len(prepared); offset += maxInt(1, s.cfg.AnalyticsBatchSize) {
+		end := offset + maxInt(1, s.cfg.AnalyticsBatchSize)
+		if end > len(prepared) {
+			end = len(prepared)
+		}
+		batchSnapshots := prepared[offset:end]
+		events := make([]AnalyticsEvent, 0, len(batchSnapshots))
+		for _, snapshot := range batchSnapshots {
+			if snapshot.SessionID == "" || snapshot.OrganizationID == "" || snapshot.LiveStreamID == "" {
+				continue
+			}
+			events = append(events, analyticsEventFromSnapshot(snapshot, AnalyticsViewerSample, now, nil))
+		}
+		if len(events) == 0 {
+			continue
+		}
+		if err := s.analyticsOutbox.Enqueue(AnalyticsEventBatch{Events: events}); err != nil {
+			s.log.Error("analytics sample could not be persisted", "err", err)
+			continue
+		}
+		s.tracker.AcknowledgeAnalyticsBatch(batchSnapshots)
+	}
+}
+
+func analyticsEventFromSnapshot(snapshot Snapshot, eventType AnalyticsEventType, occurredAt time.Time, endedAt *time.Time) AnalyticsEvent {
+	return AnalyticsEvent{
+		EventID:           uuid.NewString(),
+		EventType:         eventType,
+		SchemaVersion:     1,
+		Sequence:          maxInt64(1, snapshot.AnalyticsSequence),
+		OccurredAt:        occurredAt.UTC(),
+		OrganizationID:    snapshot.OrganizationID,
+		LiveStreamID:      snapshot.LiveStreamID,
+		SessionID:         snapshot.SessionID,
+		CurrentViewers:    snapshot.CurrentViewers,
+		IntervalPeak:      snapshot.IntervalPeakViewers,
+		SessionPeak:       snapshot.PeakViewers,
+		IdentityAdditions: snapshot.IdentityAdditions,
+		PlaylistDelta:     snapshot.PlaylistRequestsDelta,
+		SegmentDelta:      snapshot.SegmentRequestsDelta,
+		UniqueTotal:       int64(snapshot.UniqueViewers),
+		PlaylistTotal:     snapshot.PlaylistRequests,
+		SegmentTotal:      snapshot.SegmentRequests,
+		EndedAt:           endedAt,
+	}
+}
+
+func maxInt(value, fallback int) int {
+	if value > fallback {
+		return value
+	}
+	return fallback
+}
+
+func maxInt64(value, fallback int64) int64 {
+	if value > fallback {
+		return value
+	}
+	return fallback
 }
 
 func (s *Server) authorizeControl(w http.ResponseWriter, r *http.Request) bool {

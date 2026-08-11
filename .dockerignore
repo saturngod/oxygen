@@ -12,6 +12,7 @@ frankenphp
 # Go build artifacts
 golang-queue/bin
 golang-live/bin
+golang-analytics/bin
 
 # Env & secrets — inject via Dokploy environment instead
 .env

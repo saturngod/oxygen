@@ -63,6 +63,51 @@ test('admin can create and view a live stream with encrypted stream key', functi
         );
 });
 
+test('remote analytics metrics do not replace control-plane playback settings', function () {
+    [$user, $organization] = liveStreamAdmin();
+    $liveStream = LiveStream::factory()
+        ->for($organization)
+        ->live()
+        ->create(['settings_version' => 7]);
+    $session = LiveStreamSession::factory()
+        ->for($liveStream)
+        ->create([
+            'status' => LiveStreamSessionStatus::Live,
+            'settings_version' => 7,
+            'hls_url' => 'https://stream.example/live/index.m3u8',
+        ]);
+    $liveStream->forceFill(['active_session_id' => $session->id])->save();
+
+    config([
+        'services.analytics.url' => 'http://analytics.test',
+        'services.analytics.query_token' => 'private-query-token',
+    ]);
+    Http::fake([
+        'http://analytics.test/*' => Http::response([
+            'session' => [
+                'session_id' => $session->id,
+                'status' => 'live',
+                'current_viewers' => 18,
+                'peak_viewers' => 23,
+                'unique_viewers' => 11,
+                'playlist_requests' => 40,
+                'segment_requests' => 80,
+            ],
+        ]),
+    ]);
+
+    $this->actingAs($user)
+        ->get(route('admin.organizations.live-streams.show', [$organization, $liveStream]))
+        ->assertSuccessful()
+        ->assertInertia(fn ($page) => $page
+            ->where('liveStream.settings_version', 7)
+            ->where('liveStream.current_session.settings_version', 7)
+            ->where('liveStream.current_session.hls_url', 'https://stream.example/live/index.m3u8')
+            ->where('liveStream.current_session.current_viewers', 18)
+            ->where('liveStream.current_session.peak_viewers', 23)
+        );
+});
+
 test('live stream creation only accepts a profile from the organization', function () {
     [$user, $organization] = liveStreamAdmin();
     $foreignProfile = Profile::factory()->create();

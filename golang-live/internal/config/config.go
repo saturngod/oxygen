@@ -15,6 +15,10 @@ type Config struct {
 	FFmpegBin            string
 	FFmpegVideoCodec     string
 	CallbackRoot         string
+	AnalyticsURL         string
+	AnalyticsToken       string
+	AnalyticsOutboxRoot  string
+	AnalyticsBatchSize   int
 	LaravelURL           string
 	ServiceToken         string
 	ControlToken         string
@@ -37,6 +41,10 @@ func Load() Config {
 		FFmpegBin:            getenv("FFMPEG_BIN", "ffmpeg"),
 		FFmpegVideoCodec:     getenv("FFMPEG_VIDEO_CODEC", "libx264"),
 		CallbackRoot:         getenv("LIVE_CALLBACK_ROOT", "/tmp/oxygen-live/callbacks"),
+		AnalyticsURL:         strings.TrimRight(getenv("ANALYTICS_URL", ""), "/"),
+		AnalyticsToken:       getenv("ANALYTICS_INGEST_TOKEN", ""),
+		AnalyticsOutboxRoot:  getenv("ANALYTICS_OUTBOX_ROOT", "/tmp/oxygen-live/analytics-outbox"),
+		AnalyticsBatchSize:   intEnv("ANALYTICS_BATCH_SIZE", 100),
 		LaravelURL:           strings.TrimRight(getenv("LARAVEL_URL", "http://127.0.0.1:8000"), "/"),
 		ServiceToken:         getenv("LIVE_SERVICE_TOKEN", ""),
 		ControlToken:         getenv("LIVE_CONTROL_TOKEN", ""),

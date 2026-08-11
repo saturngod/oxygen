@@ -1,6 +1,6 @@
 # Oxygen — Video Transcoding Platform
 
-A multi-tenant video transcoding service built with **Laravel 13 + Inertia v3 + React 19** on the web layer, a standalone **Go worker** for FFmpeg-based transcoding, and a separate **Go live service** for live-stream runtime concerns. VOD transcoding coordinates through shared **Postgres**, **Redis**, and **S3**. Live streaming uses Laravel as the control plane and the Go live service for publish auth proxying, session callbacks, HLS serving, and viewer rollups.
+A multi-tenant video transcoding service built with **Laravel 13 + Inertia v3 + React 19** on the web layer, standalone **Go workers** for FFmpeg transcoding and live streaming, and an isolated **Go analytics service** with its own PostgreSQL database. VOD transcoding coordinates through shared **Postgres**, **Redis**, and **S3**. Live streaming uses Laravel as the control plane; viewer events flow through a durable live-service outbox into the analytics database.
 
 ## Architecture Overview
 
@@ -38,11 +38,13 @@ Live path:
        └─────────────────────┤◄────────────────────┘
                              │
                      ┌───────▼───────┐
-                     │    Laravel    │
-                     │ (Auth + live  │
-                     │  callbacks +  │
-                     │  viewer rollup)│
-                     └───────────────┘
+                     │    Laravel    │───────────────┐
+                     │ (Auth + live  │               │ private query API
+                     │  callbacks)   │               ▼
+                     └───────────────┘       ┌───────────────┐
+                                              │ Go analytics  │
+                                              │ + analytics PG│
+                                              └───────────────┘
 ```
 
 ```mermaid
@@ -51,11 +53,13 @@ graph LR
     RTMP --> AUTH[Laravel<br/>publish auth + session callbacks]
     RTMP --> HLS[golang-live<br/>HLS playlists + fMP4 parts]
     HLS --> PLAYER[Browser player]
-    PLAYER --> ADMIN[Laravel<br/>admin UI + viewer rollups]
+    PLAYER --> ADMIN[Laravel<br/>admin UI]
     ADMIN --> CONTROL[golang-live<br/>restart/control]
+    RTMP -->|durable event outbox| ANALYTICS[Go analytics<br/>private query API]
+    ANALYTICS --> ANALYTICSDB[(Analytics PostgreSQL)]
 ```
 
-Live streaming uses Laravel for stream records, encrypted keys, admin UI, and viewer metrics. The standalone Go live service handles RTMP ingest, validates publishers against Laravel, remuxes the stream into HLS, serves playback, and reports session and viewer state back to Laravel.
+Live streaming uses Laravel for stream records, encrypted keys, admin UI, and lifecycle callbacks. The standalone Go live service handles RTMP ingest, validates publishers against Laravel, remuxes the stream into HLS, serves playback, and sends viewer events to the isolated analytics service.
 
 ## Recommended Deployment Architecture
 
@@ -75,6 +79,7 @@ graph TB
         SCHED[Laravel Scheduler<br/>cron schedule:run]
         TRANSCODER[Go Transcode Worker<br/>FFmpeg → HLS<br/>scale by # of workers]
         LIVE[Go Live Service<br/>RTMP ingest + live HLS]
+        ANALYTICS[Go Analytics API<br/>events + query]
     end
 
     subgraph data["Shared Infrastructure (managed)"]
@@ -82,6 +87,7 @@ graph TB
         REDIS[(Redis<br/>DB0 queues · DB1 cache)]
         S3SRC[(S3 — Source bucket)]
         S3STR[(S3 — Streaming bucket)]
+        APG[(Analytics PostgreSQL)]
     end
 
     BROWSER -->|HTTPS dashboard + API| LARAVEL
@@ -106,6 +112,8 @@ graph TB
     TRANSCODER -->|upload HLS| S3STR
 
     LIVE --> PG
+    LIVE --> ANALYTICS
+    ANALYTICS --> APG
 ```
 
 **Playback never touches Laravel.** Video bytes flow Browser → CDN → origin, where the origin is the **streaming S3 bucket** for VOD and the **Go live service** for live. Laravel is the control plane only — it issues presigned upload URLs, stores stream records and keys, and receives session/viewer callbacks. The browser uploads source files **directly to S3** too, so Laravel never proxies media in either direction.
@@ -119,19 +127,21 @@ graph TB
 | **Laravel scheduler** | A single cron entry (`schedule:run`) | Run exactly **one** instance | Do not run multiple — duplicate scheduled tasks. |
 | **Go transcode worker** | Standalone binary, CPU/GPU-optimized nodes | Horizontal — more workers and/or `WORKER_CONCURRENCY` | FFmpeg is CPU/GPU heavy; isolate from web nodes so transcoding never starves the dashboard. Scale to match queue depth. |
 | **Go live service** | Standalone binary with public RTMP + HLS ports | Per-stream / per-region; sticky by stream | Stateful per active broadcast (local HLS root). Put a CDN in front of HLS. Co-locate near publishers to cut latency. |
-| **Postgres** | Managed instance (e.g. RDS / Cloud SQL) | Vertical + read replicas | Single source of truth shared by Laravel and both Go services. |
+| **Go analytics API** | Standalone private Go HTTP service | Horizontal API replicas; independent PostgreSQL pool | Owns viewer event ingestion and day/month/year analytics reads. |
+| **Postgres** | Managed instance (e.g. RDS / Cloud SQL) | Vertical + read replicas | Control-plane database for Laravel, queue, and live lifecycle. |
+| **Analytics Postgres** | Dedicated managed Postgres | Independent vertical/read-replica scaling | Stores analytics events, hourly aggregates, and session metrics only. |
 | **Redis** | Managed instance | Vertical; cluster if needed | Job + webhook queues (raw LPUSH/BRPOP) on DB 0, and the Laravel application cache on DB 1. Keep the two on separate logical DBs so `cache:clear` never wipes queued jobs. |
 | **S3** | Object storage | Effectively unlimited | Separate **source** and **streaming** buckets. Front the streaming bucket with a CDN. |
 
 ### Deployment principles
 
-- **One process per container.** Web, queue worker, scheduler, transcode worker, and live service each get their own image/process and lifecycle. They communicate only through Postgres, Redis, S3, and the documented HTTP callbacks — never in-process.
+- **One process per container.** Web, queue worker, scheduler, transcode worker, live service, and analytics API each get their own image/process and lifecycle. They communicate only through Postgres, Redis, S3, and documented private HTTP callbacks — never in-process.
 - **Scale the bottleneck, not the whole app.** Transcoding is CPU/GPU-bound; add transcode workers. Dashboard traffic is HTTP-bound; add Laravel replicas. The two scale independently because they share nothing but the datastores.
 - **Keep transcoding off the web nodes.** A long FFmpeg job must never compete with dashboard requests. Run the Go worker on separate (ideally GPU) nodes.
 - **Put a CDN in front of HLS.** Both VOD (streaming bucket) and live (Go live service) output HLS — cache it at the edge so origin load stays flat as viewers grow. The Go live service already sets CDN-friendly headers (`no-cache` for `.m3u8` playlists, `public, max-age=31536000, immutable` for segments). VOD segments uploaded to the streaming bucket are immutable too, but `UploadHLS()` does not yet set an explicit `Cache-Control` — set a long-TTL/immutable policy on the streaming bucket or in the CDN so VOD segments cache as aggressively as live ones.
 - **Managed datastores.** Treat Postgres, Redis, and S3 as managed/external services. Every app service is otherwise stateless except the Go live service, which holds per-broadcast HLS on local disk.
 - **Redis cache vs. queue.** Laravel uses Redis for both the application cache (`CACHE_STORE=redis`, DB 1) and the transcode/webhook queues (DB 0). They live on separate logical databases so `php artisan cache:clear` only flushes the cache, leaving queued jobs intact. Never run `FLUSHALL`. If your managed Redis exposes only a single database (some clusters do), give cache and queue **separate Redis instances** instead of relying on the DB split.
-- **Network boundaries.** Only Laravel web and the Go live service need public ingress (HTTP + RTMP/HLS). Queue workers, the scheduler, and the transcode worker need no inbound ports — only outbound access to the datastores. The `/internal/live/*` callbacks are authenticated by a shared service token, not session auth.
+- **Network boundaries.** Only Laravel web and the Go live service need public ingress (HTTP + RTMP/HLS). Queue workers, the scheduler, the transcode worker, and analytics API need no public inbound ports. Analytics ingestion/query uses separate private bearer tokens.
 
 For local development you run all of these on one machine; see the next section. The split above is the **production** topology.
 
@@ -270,7 +280,7 @@ docker compose exec oxygen curl --fail http://s3.oxygen.test:9000/health/ready
 
 ## Running Locally — Step by Step
 
-Oxygen is **not a single process**. A full local stack runs the Laravel web app plus several long-running workers and two standalone Go services. This section walks through every piece.
+Oxygen is **not a single process**. A full local stack runs the Laravel web app plus several long-running workers and three standalone Go services. This section walks through every piece.
 
 ### What runs, and why
 
@@ -283,6 +293,7 @@ Oxygen is **not a single process**. A full local stack runs the Laravel web app 
 | 5 | Go transcode worker | `go run ./cmd/worker` (in `golang-queue/`) | VOD transcoding (ffmpeg → HLS) |
 | 6 | Go live service | `go run ./cmd/live` (in `golang-live/`) | Live streaming (RTMP ingest + HLS) |
 | 7 | Laravel scheduler | `php artisan schedule:work` | Periodic tasks — daily prune of old viewer rollups (`rollups:prune`) |
+| 8 | Go analytics API | `go run ./cmd/analytics serve` (in `golang-analytics/`) | Isolated viewer event ingestion and analytics reads |
 
 `composer run dev` bundles **1–3 + logs** into one command. **4, 5, 6, and 7 are always separate.** Skip 6 if you are not using live streaming. Skip 7 in short dev sessions — it only matters for long-running/production environments.
 
@@ -294,7 +305,7 @@ Install these first:
 - **Node 20+** + **npm**
 - **Go 1.25+**
 - **FFmpeg** (`ffmpeg` + `ffprobe` on `PATH`) — required by the transcode worker
-- **PostgreSQL** — shared by Laravel and both Go services
+- **PostgreSQL** — control-plane database plus a separate analytics database
 - **Redis** — job + webhook queues
 - **S3** — an AWS bucket, or an S3-compatible server locally such as [RustFS](https://docs.rustfs.com/installation/docker/) or MinIO (separate source + streaming buckets recommended; see [Local Docker S3 Setup with RustFS](#local-docker-s3-setup-with-rustfs))
 
@@ -407,13 +418,33 @@ go run ./cmd/live
 
 See [Live Streaming](#live-streaming) for the OBS setup and full endpoint list.
 
-### Step 6 — Start the Laravel scheduler (new terminal, optional in dev)
+### Step 6 — Start the analytics service (new terminal, optional without live analytics)
+
+The analytics service uses a separate PostgreSQL database and does not run
+Laravel migrations. On startup, the API applies any pending versioned Goose
+migrations once before it begins listening:
+
+```bash
+cd golang-analytics
+cp .env.example .env     # configure the dedicated Postgres URL and tokens
+go run ./cmd/analytics serve
+```
+
+Set the same `ANALYTICS_URL` and query token in Laravel, and the ingest token in
+`golang-live`. Viewer analytics is then read through Laravel authorization from
+the private service.
+
+### Step 7 — Start the Laravel scheduler (new terminal, optional in dev)
 
 ```bash
 php artisan schedule:work
 ```
 
-This runs scheduled tasks — currently the daily `rollups:prune`, which deletes per-minute live viewer rollups older than 30 days (session summaries are kept). In production, prefer a single cron entry instead:
+When the remote analytics service is disabled, this runs the legacy daily
+`rollups:prune`, which deletes per-minute live viewer rollups older than 30 days
+(session summaries are kept). With `ANALYTICS_URL` configured, local viewer
+snapshot compaction/pruning is disabled because the analytics service owns that
+retention. In production, prefer a single cron entry instead:
 
 ```plaintext
 * * * * * cd /path/to/oxygen && php artisan schedule:run >> /dev/null 2>&1
@@ -421,7 +452,7 @@ This runs scheduled tasks — currently the daily `rollups:prune`, which deletes
 
 Run a one-off prune manually with `php artisan rollups:prune --days=30`.
 
-### Step 7 — Verify
+### Step 8 — Verify
 
 1. Open `http://127.0.0.1:8000` and register (creates an org and logs you in as admin).
 2. Upload a video under **Manage** — it goes straight to S3, then a job lands on Redis.
@@ -786,8 +817,10 @@ Every layer enforces org isolation:
 | UI components | shadcn/ui (Radix) + Lucide icons |
 | Transcode worker | Go 1.25 (standalone binary) |
 | Live service | Go 1.25 (standalone HTTP service) |
+| Analytics service | Go 1.25 (standalone private HTTP service) |
 | Transcoding | FFmpeg (subprocess) — VideoToolbox / NVENC / libx264 |
-| Database | Postgres (shared between Laravel & Go) |
+| Control-plane database | Postgres (Laravel, queue, live lifecycle) |
+| Analytics database | Dedicated Postgres (Go analytics events and aggregates) |
 | Queue | Redis DB 0 (raw LPUSH/BRPOP, not Laravel Queues) |
 | Cache | Redis DB 1 (`CACHE_STORE=redis`, separate DB from the queue) |
 | Storage | Amazon S3 (separate source + streaming buckets) |
@@ -813,6 +846,10 @@ LIVE_SERVICE_TOKEN=change-me-live-service-token \
 LIVE_CONTROL_TOKEN=change-me-live-control-token \
 go run ./cmd/live
 go build -o bin/live ./cmd/live
+
+# Go analytics service (from golang-analytics/)
+cp .env.example .env
+go run ./cmd/analytics serve  # applies pending migrations, then starts API
 ```
 
 ### Production web server (Laravel Octane / FrankenPHP)

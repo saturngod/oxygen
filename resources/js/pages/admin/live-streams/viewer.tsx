@@ -32,7 +32,8 @@ type Period = 'day' | 'month' | 'year';
 
 type AnalyticsPoint = {
     timestamp: string;
-    value: number;
+    value: number | null;
+    complete: boolean;
 };
 
 type Analytics = {
@@ -42,6 +43,7 @@ type Analytics = {
     timezone: 'UTC';
     granularity: 'hour' | 'day' | 'month';
     source_note: string;
+    available: boolean;
     points: AnalyticsPoint[];
     summary: {
         peak_viewers: number;
@@ -125,14 +127,39 @@ function ViewerLineChart({
     const padding = { top: 20, right: 24, bottom: 48, left: 56 };
     const plotWidth = width - padding.left - padding.right;
     const plotHeight = height - padding.top - padding.bottom;
-    const maximum = Math.max(0, ...points.map((point) => point.value));
+    const knownValues = points.flatMap((point) =>
+        point.value === null ? [] : [point.value],
+    );
+    const maximum = Math.max(0, ...knownValues);
     const axisMaximum = Math.max(4, Math.ceil(maximum / 4) * 4);
     const coordinates = points.map((point, index) => ({
         ...point,
         x: padding.left + (index / Math.max(1, points.length - 1)) * plotWidth,
-        y: padding.top + plotHeight - (point.value / axisMaximum) * plotHeight,
+        y:
+            padding.top +
+            plotHeight -
+            ((point.value ?? 0) / axisMaximum) * plotHeight,
     }));
-    const line = coordinates.map((point) => `${point.x},${point.y}`).join(' ');
+    const lineSegments: string[][] = [];
+    let currentSegment: string[] = [];
+
+    coordinates.forEach((point) => {
+        if (point.value === null) {
+            if (currentSegment.length > 0) {
+                lineSegments.push(currentSegment);
+                currentSegment = [];
+            }
+
+            return;
+        }
+
+        currentSegment.push(`${point.x},${point.y}`);
+    });
+
+    if (currentSegment.length > 0) {
+        lineSegments.push(currentSegment);
+    }
+
     const labels = axisLabelIndexes(period);
 
     return (
@@ -211,22 +238,25 @@ function ViewerLineChart({
                         );
                     })}
 
-                    <polyline
-                        points={line}
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="3"
-                        strokeLinejoin="round"
-                        strokeLinecap="round"
-                        className="text-primary"
-                    />
+                    {lineSegments.map((segment, index) => (
+                        <polyline
+                            key={index}
+                            points={segment.join(' ')}
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="3"
+                            strokeLinejoin="round"
+                            strokeLinecap="round"
+                            className="text-primary"
+                        />
+                    ))}
 
                     {coordinates.map((point) => (
                         <Tooltip key={point.timestamp}>
                             <TooltipTrigger asChild>
                                 <g
                                     tabIndex={0}
-                                    aria-label={`${formatPointLabel(point.timestamp, period, true)}: ${point.value} concurrent viewers`}
+                                    aria-label={`${formatPointLabel(point.timestamp, period, true)}: ${point.value === null ? 'no data' : `${point.value} concurrent viewers`}`}
                                     className="group/chart-point cursor-crosshair outline-none"
                                 >
                                     <circle
@@ -242,17 +272,16 @@ function ViewerLineChart({
                                         fill="currentColor"
                                         stroke="var(--background)"
                                         strokeWidth="2"
-                                        className="pointer-events-none text-primary group-focus-visible/chart-point:stroke-ring group-focus-visible/chart-point:[stroke-width:4px]"
+                                        className={`pointer-events-none ${point.value === null ? 'text-muted-foreground' : 'text-primary'} group-focus-visible/chart-point:stroke-ring group-focus-visible/chart-point:[stroke-width:4px]`}
                                     />
                                 </g>
                             </TooltipTrigger>
                             <TooltipContent side="top" sideOffset={8}>
                                 <div className="flex flex-col gap-0.5">
                                     <span className="font-medium">
-                                        {point.value.toLocaleString()}{' '}
-                                        {point.value === 1
-                                            ? 'viewer'
-                                            : 'viewers'}
+                                        {point.value === null
+                                            ? 'No data'
+                                            : `${point.value.toLocaleString()} ${point.value === 1 ? 'viewer' : 'viewers'}`}
                                     </span>
                                     <span className="opacity-75">
                                         {formatPointLabel(
@@ -267,11 +296,15 @@ function ViewerLineChart({
                     ))}
                 </svg>
             </div>
-            {maximum === 0 && (
+            {points.every((point) => point.value === null) ? (
+                <p className="text-center text-muted-foreground">
+                    No analytics data is available for this range.
+                </p>
+            ) : maximum === 0 ? (
                 <p className="text-center text-muted-foreground">
                     No viewer activity was recorded in this range.
                 </p>
-            )}
+            ) : null}
         </div>
     );
 }
@@ -408,6 +441,15 @@ export default function ViewerAnalytics({
                         );
                     })}
                 </div>
+
+                {!analytics.available && (
+                    <Card className="border-amber-500/40">
+                        <CardContent className="pt-6 text-sm text-muted-foreground">
+                            Analytics is temporarily unavailable. The chart will
+                            remain empty until the analytics service responds.
+                        </CardContent>
+                    </Card>
+                )}
 
                 <Card>
                     <CardHeader>

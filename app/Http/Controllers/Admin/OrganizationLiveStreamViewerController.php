@@ -2,12 +2,12 @@
 
 namespace App\Http\Controllers\Admin;
 
+use App\Contracts\LiveStreamAnalyticsReader;
 use App\Enums\LiveStreamViewerPeriod;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Admin\ShowLiveStreamViewerRequest;
 use App\Models\LiveStream;
 use App\Models\Organization;
-use App\Services\LiveStreamViewerAnalytics;
 use Inertia\Inertia;
 use Inertia\Response;
 
@@ -17,7 +17,7 @@ class OrganizationLiveStreamViewerController extends Controller
         ShowLiveStreamViewerRequest $request,
         Organization $organization,
         LiveStream $liveStream,
-        LiveStreamViewerAnalytics $analytics,
+        LiveStreamAnalyticsReader $analytics,
     ): Response {
         $this->authorize('manage', $organization);
         abort_unless($liveStream->organization_id === $organization->id, 404);

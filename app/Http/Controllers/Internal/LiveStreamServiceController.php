@@ -142,7 +142,7 @@ class LiveStreamServiceController extends Controller
                 return;
             }
 
-            if ($minute !== null && array_key_exists('current_viewers', $validated)) {
+            if (! filled(config('services.analytics.url')) && $minute !== null && array_key_exists('current_viewers', $validated)) {
                 $this->recordViewerSample(
                     $lockedLiveStream,
                     $lockedSession,
@@ -246,6 +246,13 @@ class LiveStreamServiceController extends Controller
     public function viewerSnapshot(Request $request): JsonResponse
     {
         $this->authorizeService($request);
+
+        if (filled(config('services.analytics.url'))) {
+            // Viewer metrics are owned by the isolated analytics service after
+            // cutover. Keep this callback as a compatibility no-op so an older
+            // golang-live binary can be upgraded without a callback failure.
+            return response()->json(['ok' => true, 'analytics' => 'remote']);
+        }
 
         $validated = $request->validate([
             'public_id' => ['required', 'string', 'max:255'],

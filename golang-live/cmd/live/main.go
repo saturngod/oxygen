@@ -37,6 +37,7 @@ func main() {
 
 	go srv.RunRollups(ctx)
 	go srv.RunCallbacks(ctx)
+	go srv.RunAnalyticsOutbox(ctx)
 
 	rtmpDone := make(chan struct{})
 	go func() {

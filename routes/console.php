@@ -8,12 +8,14 @@ Artisan::command('inspire', function () {
     $this->comment(Inspiring::quote());
 })->purpose('Display an inspiring quote');
 
-Schedule::command('rollups:compact-hourly')
-    ->hourlyAt(5)
-    ->withoutOverlapping(60)
-    ->onOneServer();
+if (! filled(config('services.analytics.url'))) {
+    Schedule::command('rollups:compact-hourly')
+        ->hourlyAt(5)
+        ->withoutOverlapping(60)
+        ->onOneServer();
 
-Schedule::command('rollups:prune')
-    ->dailyAt('01:15')
-    ->withoutOverlapping(60)
-    ->onOneServer();
+    Schedule::command('rollups:prune')
+        ->dailyAt('01:15')
+        ->withoutOverlapping(60)
+        ->onOneServer();
+}

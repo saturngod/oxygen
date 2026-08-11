@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Admin;
 
+use App\Contracts\LiveStreamAnalyticsReader;
 use App\Enums\LiveStreamStatus;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Admin\StoreLiveStreamRequest;
@@ -95,14 +96,19 @@ class OrganizationLiveStreamsController extends Controller
             ->with('toast', ['type' => 'success', 'message' => __('Live stream created.')]);
     }
 
-    public function show(Organization $organization, LiveStream $liveStream): Response
-    {
+    public function show(
+        Organization $organization,
+        LiveStream $liveStream,
+        LiveStreamAnalyticsReader $analytics,
+    ): Response {
         $this->authorize('manage', $organization);
         abort_unless($liveStream->organization_id === $organization->id, 404);
 
         $currentSession = $liveStream->sessions()
             ->whereKey($liveStream->active_session_id)
             ->first();
+
+        $remoteCurrentSession = $analytics->current($liveStream);
 
         $recentSessions = $liveStream->sessions()
             ->latest('started_at')
@@ -131,7 +137,7 @@ class OrganizationLiveStreamsController extends Controller
                 'hls_url' => $liveStream->hls_url,
                 'last_started_at' => $liveStream->last_started_at?->toIso8601String(),
                 'last_ended_at' => $liveStream->last_ended_at?->toIso8601String(),
-                'current_session' => $currentSession ? $this->sessionPayload($currentSession) : null,
+                'current_session' => $this->currentSessionPayload($currentSession, $remoteCurrentSession),
                 'recent_sessions' => $recentSessions,
             ],
         ]);
@@ -290,5 +296,40 @@ class OrganizationLiveStreamsController extends Controller
             'ended_at' => $session->ended_at?->toIso8601String(),
             'error_message' => $session->error_message,
         ];
+    }
+
+    /**
+     * Merge only metrics owned by analytics into the control-plane session
+     * payload. Stream/session identifiers and playback settings remain sourced
+     * from Laravel so a remote analytics response cannot blank the player URL.
+     *
+     * @param  array<string, mixed>|null  $remoteSession
+     * @return array<string, mixed>|null
+     */
+    private function currentSessionPayload(?LiveStreamSession $session, ?array $remoteSession): ?array
+    {
+        if ($session === null) {
+            return $remoteSession;
+        }
+
+        $payload = $this->sessionPayload($session);
+
+        foreach ([
+            'status',
+            'current_viewers',
+            'peak_viewers',
+            'unique_viewers',
+            'playlist_requests',
+            'segment_requests',
+            'started_at',
+            'ended_at',
+            'error_message',
+        ] as $key) {
+            if (array_key_exists($key, $remoteSession ?? [])) {
+                $payload[$key] = $remoteSession[$key];
+            }
+        }
+
+        return $payload;
     }
 }

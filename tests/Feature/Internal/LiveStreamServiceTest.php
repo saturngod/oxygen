@@ -216,6 +216,34 @@ test('service callbacks track live session and viewer rollups', function () {
         ->and($session->playlist_requests)->toBe(100);
 });
 
+test('viewer snapshots stop writing Laravel rollups after analytics cutover', function () {
+    config(['services.analytics.url' => 'http://analytics-api:8090']);
+
+    $liveStream = LiveStream::factory()->create();
+    $sessionId = $this->withHeader('X-Live-Service-Token', 'live-token')
+        ->postJson(route('internal.live.session-started'), [
+            'public_id' => $liveStream->public_id,
+            'external_id' => 'remote-analytics-session',
+        ])
+        ->assertOk()
+        ->json('session_id');
+
+    $this->withHeader('X-Live-Service-Token', 'live-token')
+        ->postJson(route('internal.live.viewer-snapshot'), [
+            'public_id' => $liveStream->public_id,
+            'session_id' => $sessionId,
+            'current_viewers' => 12,
+            'unique_viewers_seen' => 12,
+            'playlist_requests' => 20,
+            'segment_requests' => 40,
+        ])
+        ->assertOk()
+        ->assertJsonPath('analytics', 'remote');
+
+    expect(LiveStreamViewerRollup::query()->count())->toBe(0)
+        ->and(LiveStreamSession::query()->findOrFail($sessionId)->current_viewers)->toBe(0);
+});
+
 test('session end persists a final viewer rollup without a periodic snapshot', function () {
     $liveStream = LiveStream::factory()->create();
 

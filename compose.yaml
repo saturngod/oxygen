@@ -16,6 +16,7 @@ services:
     volumes:
       - public-uploads:/app/storage/app/public
       - live-callbacks:/var/lib/oxygen-live/callbacks
+      - analytics-outbox:/var/lib/oxygen-live/analytics-outbox
       - transcode-work:/tmp/transcoder
     networks:
       - oxygen-network
@@ -26,6 +27,38 @@ services:
         condition: service_healthy
     restart: unless-stopped
     stop_grace_period: 24h
+
+  analytics-postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: oxygen_analytics
+      POSTGRES_USER: oxygen_analytics
+      POSTGRES_PASSWORD: local-analytics-password
+    volumes:
+      - analytics-pgdata:/var/lib/postgresql/data
+    networks:
+      - oxygen-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oxygen_analytics -d oxygen_analytics"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  analytics-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: analytics-runtime
+    env_file:
+      - path: docker/local.env
+        required: true
+    networks:
+      - oxygen-network
+    depends_on:
+      analytics-postgres:
+        condition: service_healthy
+    restart: unless-stopped
 
   stream-postgres:
     image: postgres:16-alpine
@@ -61,9 +94,11 @@ services:
 volumes:
   public-uploads:
   live-callbacks:
+  analytics-outbox:
   transcode-work:
   pgdata:
   redis-data:
+  analytics-pgdata:
 
 networks:
   oxygen-network:

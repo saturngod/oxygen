@@ -2,6 +2,9 @@
 
 namespace App\Providers;
 
+use App\Contracts\LiveStreamAnalyticsReader;
+use App\Services\LiveStreamViewerAnalytics;
+use App\Services\RemoteLiveStreamAnalytics;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\Date;
 use Illuminate\Support\Facades\DB;
@@ -15,7 +18,13 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        //
+        $this->app->bind(LiveStreamAnalyticsReader::class, function ($app): LiveStreamAnalyticsReader {
+            if (filled(config('services.analytics.url'))) {
+                return $app->make(RemoteLiveStreamAnalytics::class);
+            }
+
+            return $app->make(LiveStreamViewerAnalytics::class);
+        });
     }
 
     /**

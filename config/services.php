@@ -50,4 +50,11 @@ return [
         'viewer_compaction_lookback_hours' => (int) env('LIVE_VIEWER_COMPACTION_LOOKBACK_HOURS', 48),
     ],
 
+    'analytics' => [
+        'url' => env('ANALYTICS_URL'),
+        'query_token' => env('ANALYTICS_QUERY_TOKEN'),
+        'connect_timeout' => (int) env('ANALYTICS_CONNECT_TIMEOUT_SECONDS', 2),
+        'timeout' => (int) env('ANALYTICS_TIMEOUT_SECONDS', 5),
+    ],
+
 ];

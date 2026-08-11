@@ -16,6 +16,7 @@ import (
 	hlscodecs "github.com/bluenviron/gohlslib/v2/pkg/codecs"
 	"github.com/bluenviron/gortmplib"
 	rtmpcodecs "github.com/bluenviron/gortmplib/pkg/codecs"
+	"github.com/google/uuid"
 )
 
 func (s *Server) RunRTMP(ctx context.Context) error {
@@ -221,7 +222,27 @@ func (s *Server) handleRTMPConnInner(ctx context.Context, conn net.Conn) error {
 	}
 	defer s.removeLiveSession(publicID, session)
 
-	s.tracker.StartSession(publicID, startResp.SessionID)
+	startedAt := time.Now().UTC()
+	s.tracker.StartSession(publicID, startResp.SessionID, SessionContext{
+		OrganizationID: auth.Stream.OrganizationID,
+		LiveStreamID:   auth.Stream.ID,
+	})
+	if s.analyticsOutbox != nil {
+		if err := s.analyticsOutbox.Enqueue(AnalyticsEventBatch{Events: []AnalyticsEvent{{
+			EventID:        uuid.NewString(),
+			EventType:      AnalyticsSessionStarted,
+			SchemaVersion:  1,
+			Sequence:       1,
+			OccurredAt:     startedAt,
+			OrganizationID: auth.Stream.OrganizationID,
+			LiveStreamID:   auth.Stream.ID,
+			SessionID:      startResp.SessionID,
+			Status:         "live",
+			StartedAt:      &startedAt,
+		}}}); err != nil {
+			s.log.Error("analytics session start could not be persisted", "err", err, "public_id", publicID)
+		}
+	}
 	defer s.endRTMPSession(publicID, startResp.SessionID)
 
 	for {
@@ -243,12 +264,22 @@ func (s *Server) cleanupHLSDir(dir string) {
 }
 
 func (s *Server) endRTMPSession(publicID, sessionID string) {
-	endedAt := time.Now()
-	snapshot := s.tracker.EndSessionSnapshot(publicID, endedAt)
+	endedAt := time.Now().UTC()
+	snapshot := s.tracker.PrepareEndSessionSnapshot(publicID, endedAt)
 
 	if snapshot.SessionID == "" {
 		snapshot.SessionID = sessionID
 	}
+	if s.analyticsOutbox != nil && snapshot.OrganizationID != "" && snapshot.LiveStreamID != "" && snapshot.SessionID != "" {
+		if err := s.analyticsOutbox.Enqueue(AnalyticsEventBatch{Events: []AnalyticsEvent{
+			analyticsEventFromSnapshot(snapshot, AnalyticsSessionEnded, endedAt, &endedAt),
+		}}); err != nil {
+			s.log.Error("analytics session end could not be persisted", "err", err, "public_id", publicID)
+		}
+	}
+	// The terminal event has been durably written (or a failure has been
+	// recorded) before tracker state is released.
+	s.tracker.EndSession(publicID)
 
 	payload := map[string]any{
 		"public_id":         publicID,

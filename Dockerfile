@@ -51,7 +51,7 @@ RUN mkdir -p bootstrap/cache \
     && npm run build
 
 
-# ── Stage 4: build the two Go services ───────────────────────
+# ── Stage 4: build the Go services ──────────────────────────
 FROM golang:1.25.1-bookworm AS go-build
 WORKDIR /src
 
@@ -67,8 +67,38 @@ RUN cd golang-live && go mod download
 COPY golang-live ./golang-live
 RUN cd golang-live && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/oxygen-live ./cmd/live
 
+# golang-analytics (isolated analytics ingestion/query API)
+COPY golang-analytics/go.mod golang-analytics/go.sum ./golang-analytics/
+RUN cd golang-analytics && go mod download
+COPY golang-analytics ./golang-analytics
+RUN cd golang-analytics && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/oxygen-analytics ./cmd/analytics
 
-# ── Stage 5: final runtime image ─────────────────────────────
+
+# ── Stage 5: analytics-only runtime image ────────────────────
+FROM debian:bookworm-slim AS analytics-runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system analytics \
+    && useradd --system --gid analytics --home-dir /app --shell /usr/sbin/nologin analytics
+
+WORKDIR /app
+COPY --from=go-build /out/oxygen-analytics /usr/local/bin/oxygen-analytics
+COPY --chown=analytics:analytics golang-analytics/migrations ./migrations
+
+ENV ANALYTICS_MIGRATIONS_PATH=/app/migrations
+
+USER analytics
+EXPOSE 8090
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=6 \
+    CMD curl --fail --silent http://127.0.0.1:8090/healthz || exit 1
+ENTRYPOINT ["/usr/local/bin/oxygen-analytics"]
+CMD ["serve"]
+
+
+# ── Stage 6: final Oxygen runtime image ──────────────────────
 FROM dunglas/frankenphp:1-php8.4-bookworm AS runtime
 
 # System deps: ffmpeg (transcode worker), supervisor (process mgr).
@@ -120,7 +150,8 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/healthcheck.sh
 # valid when /app/storage/app/public is mounted as a Dokploy volume.
 ENV WORK_DIR=/tmp/transcoder \
     LIVE_HLS_ROOT=/var/lib/oxygen-live/hls \
-    LIVE_CALLBACK_ROOT=/var/lib/oxygen-live/callbacks
+    LIVE_CALLBACK_ROOT=/var/lib/oxygen-live/callbacks \
+    ANALYTICS_OUTBOX_ROOT=/var/lib/oxygen-live/analytics-outbox
 
 RUN mkdir -p \
         storage/app/public \
@@ -132,6 +163,7 @@ RUN mkdir -p \
         /tmp/transcoder \
         /var/lib/oxygen-live/hls \
         /var/lib/oxygen-live/callbacks \
+        /var/lib/oxygen-live/analytics-outbox \
     && rm -rf public/storage \
     && ln -s ../storage/app/public public/storage \
     && chown -R oxygen:oxygen \
@@ -141,7 +173,7 @@ RUN mkdir -p \
 # Configure named Dokploy volumes for public organization images and the live
 # callback outbox. Transcode scratch is intentionally a separate sized volume
 # (~15GB x WORKER_CONCURRENCY) and is cleaned after each successful job.
-VOLUME ["/app/storage/app/public", "/var/lib/oxygen-live/callbacks", "/tmp/transcoder"]
+VOLUME ["/app/storage/app/public", "/var/lib/oxygen-live/callbacks", "/var/lib/oxygen-live/analytics-outbox", "/tmp/transcoder"]
 
 # Ports: 8000 web/Octane, 8081 live HTTP/HLS, 1935 RTMP ingest.
 EXPOSE 8000 8081 1935

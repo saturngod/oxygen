@@ -356,6 +356,40 @@ func TestTrackerCapsViewerCardinality(t *testing.T) {
 	}
 }
 
+func TestTrackerAnalyticsDeltasAndIntervalPeakAreAcknowledgedAfterDurableWrite(t *testing.T) {
+	tracker := NewTracker(time.Minute, 100)
+	tracker.StartSession("public-1", "session-1", SessionContext{
+		OrganizationID: "org-1",
+		LiveStreamID:   "stream-1",
+	})
+	now := time.Now().UTC()
+	tracker.Observe("public-1", "viewer-1", "index.m3u8", now)
+	tracker.Observe("public-1", "viewer-2", "segment.mp4", now)
+
+	prepared := tracker.PrepareAnalyticsBatch(now)
+	if len(prepared) != 1 {
+		t.Fatalf("expected one prepared stream, got %d", len(prepared))
+	}
+	if prepared[0].IdentityAdditions != 2 || prepared[0].PlaylistRequestsDelta != 1 || prepared[0].SegmentRequestsDelta != 1 {
+		t.Fatalf("unexpected analytics deltas: %+v", prepared[0])
+	}
+	if prepared[0].IntervalPeakViewers != 2 || prepared[0].AnalyticsSequence != 2 {
+		t.Fatalf("unexpected analytics peak/sequence: %+v", prepared[0])
+	}
+
+	tracker.AcknowledgeAnalyticsBatch(prepared)
+	after := tracker.PrepareAnalyticsBatch(now)
+	if after[0].IdentityAdditions != 0 || after[0].PlaylistRequestsDelta != 0 || after[0].SegmentRequestsDelta != 0 {
+		t.Fatalf("expected acknowledged deltas to reset: %+v", after[0])
+	}
+
+	tracker.Observe("public-1", "viewer-1", "index.m3u8", now)
+	next := tracker.PrepareAnalyticsBatch(now)
+	if next[0].IdentityAdditions != 0 || next[0].PlaylistRequestsDelta != 1 || next[0].IntervalPeakViewers != 2 {
+		t.Fatalf("expected only new interval request/peak: %+v", next[0])
+	}
+}
+
 func TestPublisherReservationIsAtomic(t *testing.T) {
 	srv := New(config.Config{
 		ViewerTTL:         time.Minute,

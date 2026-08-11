@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Contracts\LiveStreamAnalyticsReader;
 use App\Enums\LiveStreamViewerPeriod;
 use App\Models\LiveStream;
 use App\Models\LiveStreamViewerHourlyRollup;
@@ -9,7 +10,7 @@ use App\Models\LiveStreamViewerRollup;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\Date;
 
-class LiveStreamViewerAnalytics
+class LiveStreamViewerAnalytics implements LiveStreamAnalyticsReader
 {
     /**
      * @return array{
@@ -19,7 +20,7 @@ class LiveStreamViewerAnalytics
      *     timezone: string,
      *     granularity: string,
      *     source_note: string,
-     *     points: list<array{timestamp: string, value: int}>,
+     *     points: list<array{timestamp: string, value: int|null, complete: bool}>,
      *     summary: array{peak_viewers: int, broadcasts: int, viewer_identity_additions: int, playback_requests: int}
      * }
      */
@@ -40,6 +41,7 @@ class LiveStreamViewerAnalytics
 
         return [
             'range_label' => $period->label(),
+            'available' => true,
             'range_start' => $start->toIso8601String(),
             'range_end' => $end->toIso8601String(),
             'timezone' => 'UTC',
@@ -92,10 +94,38 @@ class LiveStreamViewerAnalytics
             $points[$this->bucketKey($period, $timestamp)] = [
                 'timestamp' => $timestamp->toIso8601String(),
                 'value' => 0,
+                'complete' => true,
             ];
         }
 
         return $points;
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    public function current(LiveStream $liveStream): ?array
+    {
+        $session = $liveStream->sessions()
+            ->whereIn('status', ['starting', 'live'])
+            ->latest('started_at')
+            ->first();
+
+        if ($session === null) {
+            return null;
+        }
+
+        return [
+            'session_id' => $session->id,
+            'status' => $session->status->value,
+            'started_at' => $session->started_at?->toIso8601String(),
+            'ended_at' => $session->ended_at?->toIso8601String(),
+            'current_viewers' => $session->current_viewers,
+            'peak_viewers' => $session->peak_viewers,
+            'unique_viewers' => $session->unique_viewers,
+            'playlist_requests' => $session->playlist_requests,
+            'segment_requests' => $session->segment_requests,
+        ];
     }
 
     /**
