@@ -92,6 +92,7 @@ class OrganizationProfilesController extends Controller
                 'name' => $profile->name,
                 'qualities' => $profile->qualities,
                 'is_default' => $profile->is_default,
+                'generate_thumbnail' => $profile->generate_thumbnail,
             ],
             'qualities' => VideoQuality::catalog(),
         ]);

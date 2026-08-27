@@ -23,6 +23,7 @@ class StoreProfileRequest extends FormRequest
             'name' => ['required', 'string', 'max:255'],
             'qualities' => ['required', 'array', 'min:1'],
             'qualities.*' => ['required', 'string', Rule::enum(VideoQuality::class)],
+            'generate_thumbnail' => ['required', 'boolean'],
         ];
     }
 }

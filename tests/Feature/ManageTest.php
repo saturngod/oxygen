@@ -12,6 +12,7 @@ use App\Models\User;
 use App\Services\S3MultipartUploadManager;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Facades\Storage;
 
 uses(RefreshDatabase::class);
@@ -107,6 +108,16 @@ test('folder creation requires a name', function () {
 
 test('authenticated user can add a video from a URL', function () {
     [$user, $org, $profile] = manageActor();
+    $profile->update(['generate_thumbnail' => true]);
+
+    $queuedPayloads = [];
+    Redis::shouldReceive('lpush')
+        ->twice()
+        ->andReturnUsing(function (string $key, string $payload) use (&$queuedPayloads): int {
+            $queuedPayloads[$key] = json_decode($payload, true, flags: JSON_THROW_ON_ERROR);
+
+            return 1;
+        });
 
     $this->actingAs($user)
         ->withSession(['current_organization_id' => $org->getKey()])
@@ -128,7 +139,8 @@ test('authenticated user can add a video from a URL', function () {
     $snapshot = $media->profiles()->sole();
     expect($snapshot->profile_id)->toBe($profile->id)
         ->and($snapshot->name)->toBe('Default')
-        ->and($snapshot->qualities)->toBe([VideoQuality::Hd720p->value, VideoQuality::Hd1080p->value]);
+        ->and($snapshot->qualities)->toBe([VideoQuality::Hd720p->value, VideoQuality::Hd1080p->value])
+        ->and($queuedPayloads[config('services.transcode.queue_key')]['generate_thumbnail'])->toBeTrue();
 });
 
 test('url import requires a profile', function () {
@@ -222,6 +234,7 @@ test('url import rejects private and metadata addresses', function () {
 
 test('init multipart upload returns upload id and caches session', function () {
     [$user, $org, $profile] = manageActor();
+    $profile->update(['generate_thumbnail' => true]);
 
     $this->mock(S3MultipartUploadManager::class)
         ->shouldReceive('initiate')
@@ -247,6 +260,7 @@ test('init multipart upload returns upload id and caches session', function () {
     expect($session['profile_id'])->toBe($profile->id);
     expect($session['profile_name'])->toBe('Default');
     expect($session['profile_qualities'])->toBe([VideoQuality::Hd720p->value, VideoQuality::Hd1080p->value]);
+    expect($session['profile_generate_thumbnail'])->toBeTrue();
 });
 
 test('init multipart upload rejects profile from another organization', function () {
@@ -340,6 +354,15 @@ test('sign part rejects session owned by another user', function () {
 test('complete creates media file and clears cache', function () {
     [$user, $org, $profile] = manageActor();
 
+    $queuedPayloads = [];
+    Redis::shouldReceive('lpush')
+        ->twice()
+        ->andReturnUsing(function (string $key, string $payload) use (&$queuedPayloads): int {
+            $queuedPayloads[$key] = json_decode($payload, true, flags: JSON_THROW_ON_ERROR);
+
+            return 1;
+        });
+
     Cache::put('manage:upload:aws-upload-id', [
         'organization_id' => $org->getKey(),
         'user_id' => $user->getKey(),
@@ -349,6 +372,7 @@ test('complete creates media file and clears cache', function () {
         'profile_id' => $profile->id,
         'profile_name' => 'Default',
         'profile_qualities' => [VideoQuality::Hd720p->value, VideoQuality::Hd1080p->value],
+        'profile_generate_thumbnail' => false,
     ], now()->addHour());
 
     $mock = $this->mock(S3MultipartUploadManager::class);
@@ -385,7 +409,8 @@ test('complete creates media file and clears cache', function () {
     $snapshot = $media->profiles()->sole();
     expect($snapshot->profile_id)->toBe($profile->id)
         ->and($snapshot->name)->toBe('Default')
-        ->and($snapshot->qualities)->toBe([VideoQuality::Hd720p->value, VideoQuality::Hd1080p->value]);
+        ->and($snapshot->qualities)->toBe([VideoQuality::Hd720p->value, VideoQuality::Hd1080p->value])
+        ->and($queuedPayloads[config('services.transcode.queue_key')]['generate_thumbnail'])->toBeFalse();
 });
 
 test('abort clears cache and calls s3 abort', function () {

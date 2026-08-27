@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 
@@ -32,12 +33,18 @@ type Config struct {
 	StreamingPathStyle bool
 	StreamingRegion    string
 
-	HLSPrefix             string
-	WorkDir               string
-	FfmpegBin             string
-	FfprobeBin            string
-	FfmpegVideoCodec      string
-	ProgressMinIntervalMs int
+	HLSPrefix                string
+	WorkDir                  string
+	FfmpegBin                string
+	FfprobeBin               string
+	FfmpegVideoCodec         string
+	ProgressMinIntervalMs    int
+	ThumbnailIntervalSeconds float64
+	ThumbnailWidth           int
+	ThumbnailColumns         int
+	ThumbnailRows            int
+	ThumbnailJPEGQuality     int
+	ThumbnailPosterWidth     int
 }
 
 func Load() (*Config, error) {
@@ -89,12 +96,54 @@ func Load() (*Config, error) {
 	cfg.FfprobeBin = getenv("FFPROBE_BIN", "ffprobe")
 	cfg.FfmpegVideoCodec = getenv("FFMPEG_VIDEO_CODEC", "auto")
 
+	if cfg.ThumbnailIntervalSeconds, err = loadFloatInRange("THUMBNAIL_INTERVAL_SECONDS", "10", 1, 3600); err != nil {
+		return nil, err
+	}
+	if cfg.ThumbnailWidth, err = loadIntInRange("THUMBNAIL_WIDTH", "160", 32, 1920); err != nil {
+		return nil, err
+	}
+	if cfg.ThumbnailColumns, err = loadIntInRange("THUMBNAIL_COLUMNS", "10", 1, 20); err != nil {
+		return nil, err
+	}
+	if cfg.ThumbnailRows, err = loadIntInRange("THUMBNAIL_ROWS", "10", 1, 20); err != nil {
+		return nil, err
+	}
+	if cfg.ThumbnailJPEGQuality, err = loadIntInRange("THUMBNAIL_JPEG_QUALITY", "5", 2, 31); err != nil {
+		return nil, err
+	}
+	if cfg.ThumbnailPosterWidth, err = loadIntInRange("THUMBNAIL_POSTER_WIDTH", "960", 32, 8192); err != nil {
+		return nil, err
+	}
+	if cfg.ThumbnailWidth*cfg.ThumbnailColumns > 8192 {
+		return nil, fmt.Errorf("thumbnail storyboard width exceeds 8192 pixels")
+	}
+
 	cfg.ProgressMinIntervalMs, err = strconv.Atoi(getenv("PROGRESS_MIN_INTERVAL_MS", "2000"))
 	if err != nil || cfg.ProgressMinIntervalMs < 500 {
 		cfg.ProgressMinIntervalMs = 2000
 	}
 
 	return cfg, nil
+}
+
+func loadIntInRange(key, defaultValue string, minimum, maximum int) (int, error) {
+	value := getenv(key, defaultValue)
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < minimum || parsed > maximum {
+		return 0, fmt.Errorf("invalid %s: %q (must be between %d and %d)", key, value, minimum, maximum)
+	}
+
+	return parsed, nil
+}
+
+func loadFloatInRange(key, defaultValue string, minimum, maximum float64) (float64, error) {
+	value := getenv(key, defaultValue)
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) || parsed < minimum || parsed > maximum {
+		return 0, fmt.Errorf("invalid %s: %q (must be between %g and %g)", key, value, minimum, maximum)
+	}
+
+	return parsed, nil
 }
 
 func buildPostgresDSN() string {

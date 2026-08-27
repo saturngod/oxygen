@@ -22,6 +22,7 @@ class ProfileFactory extends Factory
             'name' => fake()->words(2, true),
             'qualities' => [VideoQuality::Hd720p->value, VideoQuality::Hd1080p->value],
             'is_default' => false,
+            'generate_thumbnail' => false,
         ];
     }
 }

@@ -23,8 +23,8 @@ Laravel  --LPUSH-->  Redis  --BRPOP-->  Go Worker
 1. **BRPOP** job from `queues:transcode`
 2. **Load** `media_files` + `media_file_profiles` from Postgres (validate org ownership)
 3. **Presign** source S3 URL → pass directly as ffmpeg input (no local download)
-4. **Transcode** via ffmpeg — single invocation with all renditions from the profile's `qualities` array
-5. **Upload** HLS output tree (`.m3u8` + `.ts` segments) to streaming bucket
+4. **Transcode** via ffmpeg — single invocation with all renditions and, when requested, one first-frame poster plus one storyboard JPEG
+5. **Upload** HLS output tree and optional `thumbnail.jpg`, `storyboard.jpg`, and `storyboard.vtt` to the streaming bucket
 6. **Update** `media_files.status = success`, `streaming_url`, `progress = 100`
 
 ## Requirements
@@ -114,6 +114,19 @@ Can be the same bucket as source, or a separate CDN-fronted bucket.
 | `PROGRESS_MIN_INTERVAL_MS` | `2000`            | Minimum interval between DB progress writes                  |
 | `WORKER_CONCURRENCY`       | `1`               | Number of parallel ffmpeg jobs                               |
 
+### Storyboard thumbnails
+
+Jobs with `generate_thumbnail: true` produce a first-frame `thumbnail.jpg` poster plus one bounded storyboard JPEG and one WebVTT file. Cell and poster widths are configurable, while their heights are derived from each source video's display aspect ratio (including sample aspect ratio and rotation). The grid capacity limits the number of preview cells; long videos automatically use a larger sampling interval rather than creating more image files.
+
+| Variable                       | Default | Description                                      |
+| ------------------------------ | ------- | ------------------------------------------------ |
+| `THUMBNAIL_INTERVAL_SECONDS`   | `10`    | Preferred interval between preview cells         |
+| `THUMBNAIL_WIDTH`              | `160`   | Cell width; height is derived from the source aspect ratio |
+| `THUMBNAIL_COLUMNS`            | `10`    | Maximum storyboard columns                       |
+| `THUMBNAIL_ROWS`               | `10`    | Maximum storyboard rows                          |
+| `THUMBNAIL_JPEG_QUALITY`       | `5`     | FFmpeg JPEG quality (2–31; lower is higher quality) |
+| `THUMBNAIL_POSTER_WIDTH`       | `960`   | First-frame `thumbnail.jpg` width; height is derived |
+
 ## S3 path layout
 
 **Source** (uploaded by Laravel):
@@ -129,6 +142,9 @@ s3://streaming-bucket/hls/{org_id}/{media_file_id}/main.m3u8
 s3://streaming-bucket/hls/{org_id}/{media_file_id}/v0/playlist.m3u8
 s3://streaming-bucket/hls/{org_id}/{media_file_id}/v0/segment_000.ts
 s3://streaming-bucket/hls/{org_id}/{media_file_id}/v1/playlist.m3u8
+s3://streaming-bucket/hls/{org_id}/{media_file_id}/thumbnail.jpg
+s3://streaming-bucket/hls/{org_id}/{media_file_id}/thumbnails/storyboard.jpg
+s3://streaming-bucket/hls/{org_id}/{media_file_id}/thumbnails/storyboard.vtt
 ...
 ```
 
@@ -187,7 +203,8 @@ Laravel pushes a JSON payload via `Redis::lpush('queues:transcode', ...)`:
     "status": "uploaded",
     "progress": 0,
     "created_at": "2026-04-16T13:00:00Z",
-    "updated_at": "2026-04-16T13:00:00Z"
+    "updated_at": "2026-04-16T13:00:00Z",
+    "generate_thumbnail": true
 }
 ```
 

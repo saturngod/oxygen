@@ -167,7 +167,7 @@ class ManageController extends Controller
             ]);
 
             $this->attachProfileSnapshot($mediaFile, $profile);
-            $this->dispatchTranscodeJob($mediaFile);
+            $this->dispatchTranscodeJob($mediaFile, $profile->generate_thumbnail);
         });
 
         return back()->with('toast', ['type' => 'success', 'message' => __('Video queued from URL.')]);
@@ -209,6 +209,7 @@ class ManageController extends Controller
             'profile_id' => $profile->id,
             'profile_name' => $profile->name,
             'profile_qualities' => $profile->qualities,
+            'profile_generate_thumbnail' => $profile->generate_thumbnail,
         ], now()->addHours(24));
 
         return response()->json([
@@ -280,7 +281,10 @@ class ManageController extends Controller
             return $mediaFile;
         });
 
-        $this->dispatchTranscodeJob($mediaFile);
+        $this->dispatchTranscodeJob(
+            $mediaFile,
+            $session['profile_generate_thumbnail'] ?? false,
+        );
 
         Cache::forget($this->uploadCacheKey($validated['upload_id']));
 
@@ -323,11 +327,11 @@ class ManageController extends Controller
     }
 
     /**
-     * @return array{organization_id: string, user_id: int|string|null, folder_id: ?string, key: string, file_name: string, profile_id: string, profile_name: string, profile_qualities: array<int, string>}
+     * @return array{organization_id: string, user_id: int|string|null, folder_id: ?string, key: string, file_name: string, profile_id: string, profile_name: string, profile_qualities: array<int, string>, profile_generate_thumbnail?: bool}
      */
     private function authorizeUploadSession(Request $request, string $uploadId): array
     {
-        /** @var array{organization_id: string, user_id: int|string|null, folder_id: ?string, key: string, file_name: string, profile_id: string, profile_name: string, profile_qualities: array<int, string>}|null $session */
+        /** @var array{organization_id: string, user_id: int|string|null, folder_id: ?string, key: string, file_name: string, profile_id: string, profile_name: string, profile_qualities: array<int, string>, profile_generate_thumbnail?: bool}|null $session */
         $session = Cache::get($this->uploadCacheKey($uploadId));
 
         abort_if($session === null, 404, 'Upload session not found.');
@@ -355,7 +359,7 @@ class ManageController extends Controller
         return (string) $id;
     }
 
-    private function dispatchTranscodeJob(MediaFile $mediaFile): void
+    private function dispatchTranscodeJob(MediaFile $mediaFile, bool $generateThumbnail): void
     {
         $queueKey = config('services.transcode.queue_key');
         $webhookQueueKey = config('services.transcode.webhook_queue_key');
@@ -372,6 +376,7 @@ class ManageController extends Controller
             'size' => $mediaFile->size,
             'status' => $mediaFile->status->value,
             'progress' => $mediaFile->progress,
+            'generate_thumbnail' => $generateThumbnail,
             'created_at' => $mediaFile->created_at?->toIso8601String(),
             'updated_at' => $mediaFile->updated_at?->toIso8601String(),
         ]));

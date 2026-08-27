@@ -35,6 +35,7 @@ export default function CreateProfile({
     qualities: Quality[];
 }) {
     const [selected, setSelected] = useState<string[]>([]);
+    const [generateThumbnail, setGenerateThumbnail] = useState(false);
 
     setLayoutProps({
         breadcrumbs: [
@@ -97,7 +98,7 @@ export default function CreateProfile({
                         organization: organization.id,
                     })}
                     options={{ preserveScroll: true }}
-                    className="space-y-6"
+                    className="flex flex-col gap-6"
                 >
                     {({ processing, errors }) => (
                         <>
@@ -113,6 +114,39 @@ export default function CreateProfile({
                                 <InputError
                                     className="mt-2"
                                     message={errors.name}
+                                />
+                            </div>
+
+                            <div className="grid max-w-md gap-2">
+                                <input
+                                    type="hidden"
+                                    name="generate_thumbnail"
+                                    value={generateThumbnail ? '1' : '0'}
+                                />
+                                <Label
+                                    htmlFor="generate_thumbnail"
+                                    className="flex items-center gap-3"
+                                >
+                                    <Checkbox
+                                        id="generate_thumbnail"
+                                        checked={generateThumbnail}
+                                        aria-invalid={Boolean(
+                                            errors.generate_thumbnail,
+                                        )}
+                                        onCheckedChange={(checked) =>
+                                            setGenerateThumbnail(
+                                                checked === true,
+                                            )
+                                        }
+                                    />
+                                    Generate thumbnail
+                                </Label>
+                                <p className="text-xs text-muted-foreground">
+                                    Generate a thumbnail image when a video is
+                                    encoded with this profile.
+                                </p>
+                                <InputError
+                                    message={errors.generate_thumbnail}
                                 />
                             </div>
 

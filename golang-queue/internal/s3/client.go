@@ -21,8 +21,13 @@ import (
 type Client struct {
 	source    *bucketClient
 	streaming *bucketClient
+	uploader  objectUploader
 	hlsPrefix string
 	log       *slog.Logger
+}
+
+type objectUploader interface {
+	Upload(context.Context, *s3.PutObjectInput, ...func(*manager.Uploader)) (*manager.UploadOutput, error)
 }
 
 type bucketClient struct {
@@ -67,10 +72,14 @@ func NewClient(cfg *config.Config) *Client {
 
 	streaming := newBucketClient(creds, cfg.StreamingRegion,
 		cfg.StreamingBucket, cfg.StreamingEndpoint, cfg.StreamingURLPrefix, cfg.StreamingPathStyle)
+	uploader := manager.NewUploader(streaming.client, func(u *manager.Uploader) {
+		u.PartSize = 5 * 1024 * 1024
+	})
 
 	return &Client{
 		source:    source,
 		streaming: streaming,
+		uploader:  uploader,
 		hlsPrefix: cfg.HLSPrefix,
 		log:       slog.With("component", "s3"),
 	}
@@ -119,9 +128,6 @@ func (c *Client) PresignedSourceURL(ctx context.Context, key string) (string, er
 
 func (c *Client) UploadHLS(ctx context.Context, localDir, orgID, mediaFileID string) error {
 	prefix := fmt.Sprintf("%s/%s/%s", c.hlsPrefix, orgID, mediaFileID)
-	uploader := manager.NewUploader(c.streaming.client, func(u *manager.Uploader) {
-		u.PartSize = 5 * 1024 * 1024
-	})
 
 	return filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -138,33 +144,74 @@ func (c *Client) UploadHLS(ctx context.Context, localDir, orgID, mediaFileID str
 
 		key := prefix + "/" + filepath.ToSlash(rel)
 
-		f, err := os.Open(path)
-		if err != nil {
-			return fmt.Errorf("open %s: %w", path, err)
-		}
-		defer f.Close()
-
-		contentType := "application/octet-stream"
-		switch filepath.Ext(path) {
-		case ".m3u8":
-			contentType = "application/vnd.apple.mpegurl"
-		case ".ts":
-			contentType = "video/mp2t"
-		}
-
-		_, err = uploader.Upload(ctx, &s3.PutObjectInput{
-			Bucket:      aws.String(c.streaming.bucket),
-			Key:         aws.String(key),
-			Body:        f,
-			ContentType: aws.String(contentType),
-		})
-		if err != nil {
-			return fmt.Errorf("upload %s: %w", key, err)
-		}
-
-		c.log.Debug("uploaded", "key", key, "size", info.Size())
-		return nil
+		return c.uploadStreamingFile(ctx, path, key, contentType(path))
 	})
+}
+
+func (c *Client) UploadThumbnails(ctx context.Context, localDir, orgID, mediaFileID string) error {
+	prefix := fmt.Sprintf("%s/%s/%s/thumbnails", c.hlsPrefix, orgID, mediaFileID)
+	files := []struct {
+		name        string
+		contentType string
+	}{
+		{name: "storyboard.jpg", contentType: "image/jpeg"},
+		{name: "storyboard.vtt", contentType: "text/vtt; charset=utf-8"},
+	}
+
+	for _, file := range files {
+		path := filepath.Join(localDir, file.name)
+		key := prefix + "/" + file.name
+		if err := c.uploadStreamingFile(ctx, path, key, file.contentType); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (c *Client) UploadPoster(ctx context.Context, localPath, orgID, mediaFileID string) error {
+	key := fmt.Sprintf("%s/%s/%s/thumbnail.jpg", c.hlsPrefix, orgID, mediaFileID)
+	return c.uploadStreamingFile(ctx, localPath, key, "image/jpeg")
+}
+
+func (c *Client) uploadStreamingFile(ctx context.Context, path, key, fileContentType string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("upload source %s is not a regular file", path)
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	defer file.Close()
+
+	_, err = c.uploader.Upload(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(c.streaming.bucket),
+		Key:         aws.String(key),
+		Body:        file,
+		ContentType: aws.String(fileContentType),
+	})
+	if err != nil {
+		return fmt.Errorf("upload %s: %w", key, err)
+	}
+
+	c.log.Debug("uploaded", "key", key, "size", info.Size())
+	return nil
+}
+
+func contentType(path string) string {
+	switch filepath.Ext(path) {
+	case ".m3u8":
+		return "application/vnd.apple.mpegurl"
+	case ".ts":
+		return "video/mp2t"
+	default:
+		return "application/octet-stream"
+	}
 }
 
 func (c *Client) StreamingURL(orgID, mediaFileID string) string {

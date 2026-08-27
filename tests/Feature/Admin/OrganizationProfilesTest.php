@@ -64,6 +64,7 @@ test('admin can create a profile with selected qualities', function () {
             VideoQuality::Hd720p->value,
             VideoQuality::Hd1080p->value,
         ],
+        'generate_thumbnail' => true,
     ];
 
     $this->actingAs($user)
@@ -73,7 +74,8 @@ test('admin can create a profile with selected qualities', function () {
     $profile = Profile::query()->where('organization_id', $org->id)->sole();
 
     expect($profile->name)->toBe('Standard Web Delivery')
-        ->and($profile->qualities)->toEqualCanonicalizing($payload['qualities']);
+        ->and($profile->qualities)->toEqualCanonicalizing($payload['qualities'])
+        ->and($profile->generate_thumbnail)->toBeTrue();
 });
 
 test('profile requires at least one quality', function () {
@@ -87,6 +89,7 @@ test('profile requires at least one quality', function () {
         ->post(route('admin.organizations.profiles.store', $org), [
             'name' => 'Empty Profile',
             'qualities' => [],
+            'generate_thumbnail' => false,
         ])
         ->assertSessionHasErrors('qualities');
 
@@ -104,8 +107,27 @@ test('profile rejects unknown quality values', function () {
         ->post(route('admin.organizations.profiles.store', $org), [
             'name' => 'Bad Profile',
             'qualities' => ['9001p'],
+            'generate_thumbnail' => false,
         ])
         ->assertSessionHasErrors('qualities.0');
+});
+
+test('profile rejects a non-boolean thumbnail option', function () {
+    $user = User::factory()->create(['email_verified_at' => now()]);
+    $org = Organization::factory()->create();
+
+    $org->users()->attach($user, ['role' => OrganizationRole::Admin->value]);
+
+    $this->actingAs($user)
+        ->from(route('admin.organizations.profiles.create', $org))
+        ->post(route('admin.organizations.profiles.store', $org), [
+            'name' => 'Invalid Thumbnail Profile',
+            'qualities' => [VideoQuality::Hd720p->value],
+            'generate_thumbnail' => 'sometimes',
+        ])
+        ->assertSessionHasErrors('generate_thumbnail');
+
+    expect(Profile::query()->count())->toBe(0);
 });
 
 test('first profile is automatically marked as default', function () {
@@ -118,10 +140,14 @@ test('first profile is automatically marked as default', function () {
         ->post(route('admin.organizations.profiles.store', $org), [
             'name' => 'Primary',
             'qualities' => [VideoQuality::Hd720p->value],
+            'generate_thumbnail' => false,
         ])
         ->assertRedirect();
 
-    expect(Profile::query()->where('organization_id', $org->id)->sole()->is_default)->toBeTrue();
+    $profile = Profile::query()->where('organization_id', $org->id)->sole();
+
+    expect($profile->is_default)->toBeTrue()
+        ->and($profile->generate_thumbnail)->toBeFalse();
 });
 
 test('additional profiles are not default when one already exists', function () {
@@ -136,6 +162,7 @@ test('additional profiles are not default when one already exists', function () 
         ->post(route('admin.organizations.profiles.store', $org), [
             'name' => 'Second',
             'qualities' => [VideoQuality::Hd720p->value],
+            'generate_thumbnail' => false,
         ])
         ->assertRedirect();
 
@@ -201,6 +228,7 @@ test('operator cannot create a profile', function () {
         ->post(route('admin.organizations.profiles.store', $org), [
             'name' => 'Unauthorized',
             'qualities' => [VideoQuality::Hd720p->value],
+            'generate_thumbnail' => false,
         ])
         ->assertForbidden();
 });
@@ -211,11 +239,17 @@ test('admin can view profile edit page', function () {
 
     $org->users()->attach($user, ['role' => OrganizationRole::Admin->value]);
 
-    $profile = Profile::factory()->for($org)->create(['name' => 'Test Profile']);
+    $profile = Profile::factory()->for($org)->create([
+        'name' => 'Test Profile',
+        'generate_thumbnail' => true,
+    ]);
 
     $this->actingAs($user)
         ->get(route('admin.organizations.profiles.edit', [$org, $profile]))
-        ->assertSuccessful();
+        ->assertSuccessful()
+        ->assertInertia(fn ($page) => $page
+            ->where('profile.generate_thumbnail', true)
+        );
 });
 
 test('admin can update a profile name and qualities', function () {
@@ -227,11 +261,13 @@ test('admin can update a profile name and qualities', function () {
     $profile = Profile::factory()->for($org)->create([
         'name' => 'Old Name',
         'qualities' => [VideoQuality::Hd720p->value],
+        'generate_thumbnail' => false,
     ]);
 
     $payload = [
         'name' => 'Updated Name',
         'qualities' => [VideoQuality::Hd720p->value, VideoQuality::Hd1080p->value],
+        'generate_thumbnail' => true,
     ];
 
     $this->actingAs($user)
@@ -241,7 +277,8 @@ test('admin can update a profile name and qualities', function () {
     $profile->refresh();
 
     expect($profile->name)->toBe('Updated Name')
-        ->and($profile->qualities)->toEqualCanonicalizing($payload['qualities']);
+        ->and($profile->qualities)->toEqualCanonicalizing($payload['qualities'])
+        ->and($profile->generate_thumbnail)->toBeTrue();
 });
 
 test('update is scoped to the organization', function () {
@@ -257,6 +294,7 @@ test('update is scoped to the organization', function () {
         ->put(route('admin.organizations.profiles.update', [$org, $foreign]), [
             'name' => 'Hacked',
             'qualities' => [VideoQuality::Hd720p->value],
+            'generate_thumbnail' => true,
         ])
         ->assertNotFound();
 
@@ -275,6 +313,7 @@ test('operator cannot update a profile', function () {
         ->put(route('admin.organizations.profiles.update', [$org, $profile]), [
             'name' => 'Changed',
             'qualities' => [VideoQuality::Hd720p->value],
+            'generate_thumbnail' => true,
         ])
         ->assertForbidden();
 

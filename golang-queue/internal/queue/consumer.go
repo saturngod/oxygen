@@ -10,25 +10,27 @@ import (
 	"time"
 
 	"oxygen/worker/internal/db"
+	"oxygen/worker/internal/thumbnail"
 	"oxygen/worker/internal/transcode"
 
 	"github.com/redis/go-redis/v9"
 )
 
 type Job struct {
-	ID             string  `json:"id"`
-	OrganizationID string  `json:"organization_id"`
-	FolderID       *string `json:"folder_id"`
-	Title          string  `json:"title"`
-	FileName       *string `json:"file_name"`
-	FilePath       *string `json:"file_path"`
-	SourceURL      *string `json:"source_url"`
-	StreamingURL   *string `json:"streaming_url"`
-	Size           int64   `json:"size"`
-	Status         string  `json:"status"`
-	Progress       int     `json:"progress"`
-	CreatedAt      string  `json:"created_at"`
-	UpdatedAt      string  `json:"updated_at"`
+	ID                string  `json:"id"`
+	OrganizationID    string  `json:"organization_id"`
+	FolderID          *string `json:"folder_id"`
+	Title             string  `json:"title"`
+	FileName          *string `json:"file_name"`
+	FilePath          *string `json:"file_path"`
+	SourceURL         *string `json:"source_url"`
+	StreamingURL      *string `json:"streaming_url"`
+	Size              int64   `json:"size"`
+	Status            string  `json:"status"`
+	Progress          int     `json:"progress"`
+	CreatedAt         string  `json:"created_at"`
+	UpdatedAt         string  `json:"updated_at"`
+	GenerateThumbnail bool    `json:"generate_thumbnail"`
 }
 
 type WebhookEvent struct {
@@ -43,32 +45,40 @@ type WebhookEvent struct {
 type S3Client interface {
 	DownloadSource(ctx context.Context, key, destPath string) error
 	UploadHLS(ctx context.Context, localDir, orgID, mediaFileID string) error
+	UploadThumbnails(ctx context.Context, localDir, orgID, mediaFileID string) error
+	UploadPoster(ctx context.Context, localPath, orgID, mediaFileID string) error
 	StreamingURL(orgID, mediaFileID string) string
 }
 
 type Consumer struct {
-	rdb             *redis.Client
-	queueKey        string
-	webhookQueueKey string
-	workerID        int
-	log             *slog.Logger
-	store           *db.Store
-	s3              S3Client
-	transcoder      *transcode.Transcoder
-	workDir         string
+	rdb                  *redis.Client
+	queueKey             string
+	webhookQueueKey      string
+	workerID             int
+	log                  *slog.Logger
+	store                *db.Store
+	s3                   S3Client
+	transcoder           *transcode.Transcoder
+	workDir              string
+	thumbnailConfig      thumbnail.Config
+	thumbnailJPEGQuality int
+	thumbnailPosterWidth int
 }
 
-func NewConsumer(rdb *redis.Client, queueKey string, workerID int, store *db.Store, s3 S3Client, tx *transcode.Transcoder, workDir string) *Consumer {
+func NewConsumer(rdb *redis.Client, queueKey string, workerID int, store *db.Store, s3 S3Client, tx *transcode.Transcoder, workDir string, thumbnailConfig thumbnail.Config, thumbnailJPEGQuality, thumbnailPosterWidth int) *Consumer {
 	return &Consumer{
-		rdb:             rdb,
-		queueKey:        queueKey,
-		webhookQueueKey: queueKey + ":webhooks",
-		workerID:        workerID,
-		log:             slog.With("worker_id", workerID, "queue_key", queueKey),
-		store:           store,
-		s3:              s3,
-		transcoder:      tx,
-		workDir:         workDir,
+		rdb:                  rdb,
+		queueKey:             queueKey,
+		webhookQueueKey:      queueKey + ":webhooks",
+		workerID:             workerID,
+		log:                  slog.With("worker_id", workerID, "queue_key", queueKey),
+		store:                store,
+		s3:                   s3,
+		transcoder:           tx,
+		workDir:              workDir,
+		thumbnailConfig:      thumbnailConfig,
+		thumbnailJPEGQuality: thumbnailJPEGQuality,
+		thumbnailPosterWidth: thumbnailPosterWidth,
 	}
 }
 
@@ -115,7 +125,7 @@ func claimedJobContext(pollContext context.Context) context.Context {
 func (c *Consumer) handle(ctx context.Context, raw string) {
 	var job Job
 	if err := json.Unmarshal([]byte(raw), &job); err != nil {
-		c.log.Error("decode job failed", "err", err, "raw", raw)
+		c.log.Error("decode job failed", "err", err)
 		return
 	}
 
@@ -131,6 +141,7 @@ func (c *Consumer) handle(ctx context.Context, raw string) {
 		"file_path", strOrEmpty(job.FilePath),
 		"size", job.Size,
 		"status", job.Status,
+		"generate_thumbnail", job.GenerateThumbnail,
 	)
 
 	mediaFile, err := c.store.LoadMediaFile(ctx, job.ID, job.OrganizationID)
@@ -198,7 +209,70 @@ func (c *Consumer) handle(ctx context.Context, raw string) {
 		return
 	}
 
-	err = c.transcoder.Run(ctx, sourcePath, profile.Qualities, outputDir, func(pct int) {
+	mediaInfo, mediaProbeErr := c.transcoder.ProbeMedia(ctx, sourcePath)
+	mediaInfoValid := mediaProbeErr == nil && mediaInfo.Duration > 0
+	duration := mediaInfo.Duration
+	if !mediaInfoValid {
+		c.log.Warn("media probe failed, using progress fallback", "err", mediaProbeErr, "media_file_id", job.ID)
+		if job.GenerateThumbnail {
+			thumbnailErr := mediaProbeErr
+			if thumbnailErr == nil {
+				thumbnailErr = errors.New("probed media information is invalid")
+			}
+			c.log.Error("thumbnail_generation_failed", "error", thumbnailErr, "media_file_id", job.ID, "organization_id", job.OrganizationID)
+		}
+		duration = 1
+	}
+
+	var thumbnailOptions *transcode.ThumbnailOptions
+	thumbnailDir := filepath.Join(jobDir, "thumbnails")
+	thumbnailStartedAt := time.Now()
+	if job.GenerateThumbnail && mediaInfoValid {
+		jobThumbnailConfig := c.thumbnailConfig
+		derivedHeight, heightErr := thumbnail.HeightForAspectRatio(jobThumbnailConfig.Width, mediaInfo.DisplayAspectRatio)
+		posterHeight, posterHeightErr := thumbnail.HeightForAspectRatio(c.thumbnailPosterWidth, mediaInfo.DisplayAspectRatio)
+		jobThumbnailConfig.Height = derivedHeight
+		plan, planErr := thumbnail.BuildPlan(duration, jobThumbnailConfig)
+		if heightErr == nil && derivedHeight*jobThumbnailConfig.Rows > 8192 {
+			heightErr = errors.New("derived thumbnail storyboard height exceeds 8192 pixels")
+		}
+		if posterHeightErr == nil && posterHeight > 8192 {
+			posterHeightErr = errors.New("derived poster height exceeds 8192 pixels")
+		}
+		if heightErr != nil {
+			c.log.Error("thumbnail_generation_failed", "error", heightErr, "media_file_id", job.ID, "organization_id", job.OrganizationID)
+		} else if posterHeightErr != nil {
+			c.log.Error("thumbnail_generation_failed", "error", posterHeightErr, "media_file_id", job.ID, "organization_id", job.OrganizationID)
+		} else if planErr != nil {
+			c.log.Error("thumbnail_generation_failed", "error", planErr, "media_file_id", job.ID, "organization_id", job.OrganizationID)
+		} else if mkdirErr := os.MkdirAll(thumbnailDir, 0o755); mkdirErr != nil {
+			c.log.Error("thumbnail_generation_failed", "error", mkdirErr, "media_file_id", job.ID, "organization_id", job.OrganizationID)
+		} else {
+			thumbnailOptions = &transcode.ThumbnailOptions{
+				StoryboardOutputPath: filepath.Join(thumbnailDir, thumbnail.StoryboardFilename),
+				PosterOutputPath:     filepath.Join(jobDir, thumbnail.PosterFilename),
+				PosterWidth:          c.thumbnailPosterWidth,
+				PosterHeight:         posterHeight,
+				Config:               jobThumbnailConfig,
+				Plan:                 plan,
+				JPEGQuality:          c.thumbnailJPEGQuality,
+			}
+			c.log.Info("thumbnail_generation_enabled",
+				"media_file_id", job.ID,
+				"organization_id", job.OrganizationID,
+				"duration_seconds", duration,
+				"interval_seconds", jobThumbnailConfig.IntervalSeconds,
+				"effective_interval_seconds", plan.EffectiveInterval,
+				"storyboard_cell_count", plan.StoryboardCellCount,
+				"storyboard_width", plan.Columns*jobThumbnailConfig.Width,
+				"storyboard_height", plan.Rows*jobThumbnailConfig.Height,
+				"poster_width", c.thumbnailPosterWidth,
+				"poster_height", posterHeight,
+			)
+		}
+	}
+
+	err = c.transcoder.Run(ctx, sourcePath, profile.Qualities, outputDir, duration, thumbnailOptions, func(pct int) {
 		if dbErr := c.store.UpdateProgress(ctx, job.ID, "progress", pct); dbErr != nil {
 			c.log.Error("update progress failed", "err", dbErr, "pct", pct)
 		}
@@ -214,6 +288,57 @@ func (c *Consumer) handle(ctx context.Context, raw string) {
 		c.log.Error("s3 upload failed", "err", err, "media_file_id", job.ID)
 		c.markFailedWithWebhook(ctx, job, mediaFile, 0)
 		return
+	}
+
+	if thumbnailOptions != nil {
+		storyboardBytes, thumbnailErr := thumbnail.ValidateAndWriteVTT(thumbnailDir, duration, thumbnailOptions.Config, thumbnailOptions.Plan)
+		if thumbnailErr != nil {
+			c.log.Error("thumbnail_generation_failed",
+				"error", thumbnailErr,
+				"media_file_id", job.ID,
+				"organization_id", job.OrganizationID,
+			)
+		} else {
+			c.log.Info("thumbnail_generation_completed",
+				"media_file_id", job.ID,
+				"organization_id", job.OrganizationID,
+				"output_bytes", storyboardBytes,
+				"elapsed_ms", time.Since(thumbnailStartedAt).Milliseconds(),
+			)
+			if uploadErr := c.s3.UploadThumbnails(ctx, thumbnailDir, job.OrganizationID, job.ID); uploadErr != nil {
+				c.log.Error("thumbnail_upload_failed",
+					"error", uploadErr,
+					"media_file_id", job.ID,
+					"organization_id", job.OrganizationID,
+				)
+			} else {
+				c.log.Info("thumbnail_upload_completed",
+					"media_file_id", job.ID,
+					"organization_id", job.OrganizationID,
+				)
+			}
+		}
+
+		posterBytes, posterErr := thumbnail.ValidatePoster(thumbnailOptions.PosterOutputPath)
+		if posterErr != nil {
+			c.log.Error("poster_generation_failed",
+				"error", posterErr,
+				"media_file_id", job.ID,
+				"organization_id", job.OrganizationID,
+			)
+		} else if uploadErr := c.s3.UploadPoster(ctx, thumbnailOptions.PosterOutputPath, job.OrganizationID, job.ID); uploadErr != nil {
+			c.log.Error("poster_upload_failed",
+				"error", uploadErr,
+				"media_file_id", job.ID,
+				"organization_id", job.OrganizationID,
+			)
+		} else {
+			c.log.Info("poster_upload_completed",
+				"media_file_id", job.ID,
+				"organization_id", job.OrganizationID,
+				"output_bytes", posterBytes,
+			)
+		}
 	}
 
 	streamingURL := c.s3.StreamingURL(job.OrganizationID, job.ID)

@@ -12,6 +12,7 @@ import (
 	"oxygen/worker/internal/db"
 	"oxygen/worker/internal/queue"
 	"oxygen/worker/internal/s3"
+	"oxygen/worker/internal/thumbnail"
 	"oxygen/worker/internal/transcode"
 
 	"github.com/redis/go-redis/v9"
@@ -56,6 +57,12 @@ func main() {
 	s3Client := s3.NewClient(cfg)
 
 	tx := transcode.NewTranscoder(cfg)
+	thumbnailConfig := thumbnail.Config{
+		IntervalSeconds: cfg.ThumbnailIntervalSeconds,
+		Width:           cfg.ThumbnailWidth,
+		Columns:         cfg.ThumbnailColumns,
+		Rows:            cfg.ThumbnailRows,
+	}
 
 	logger.Info("worker starting",
 		"queue_key", cfg.QueueKey,
@@ -72,7 +79,7 @@ func main() {
 		workerID := i
 		go func() {
 			defer wg.Done()
-			consumer := queue.NewConsumer(rdb, cfg.QueueKey, workerID, store, s3Client, tx, cfg.WorkDir)
+			consumer := queue.NewConsumer(rdb, cfg.QueueKey, workerID, store, s3Client, tx, cfg.WorkDir, thumbnailConfig, cfg.ThumbnailJPEGQuality, cfg.ThumbnailPosterWidth)
 			consumer.Run(ctx)
 		}()
 	}

@@ -9,11 +9,18 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
-#[Fillable(['organization_id', 'name', 'qualities', 'is_default'])]
+#[Fillable(['organization_id', 'name', 'qualities', 'is_default', 'generate_thumbnail'])]
 class Profile extends Model
 {
     /** @use HasFactory<ProfileFactory> */
     use HasFactory, HasUuids;
+
+    /**
+     * @var array<string, mixed>
+     */
+    protected $attributes = [
+        'generate_thumbnail' => false,
+    ];
 
     /**
      * @return array<string, string>
@@ -23,6 +30,7 @@ class Profile extends Model
         return [
             'qualities' => 'array',
             'is_default' => 'boolean',
+            'generate_thumbnail' => 'boolean',
         ];
     }
 
