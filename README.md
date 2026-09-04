@@ -11,8 +11,8 @@ VOD path:
 ```
 ┌──────────────┐      ┌──────────────┐      ┌──────────────┐
 │   Browser    │      │   Laravel    │      │  Go Worker   │
-│  (React/     │─────▶│  (Upload &   │─────▶│  (FFmpeg     │
-│   Inertia)   │      │   Manage)    │      │   Transcode) │
+│  (React/     │─────▶│  (Upload &   │─────▶│ (FFmpeg HLS  │
+│   Inertia)   │      │   Manage)    │      │ + previews)  │
 └──────┬───────┘      └──────┬───────┘      └──────┬───────┘
        │                     │                     │
        │  S3 Direct Upload   │    Redis (Jobs)     │
@@ -21,8 +21,8 @@ VOD path:
                      ┌───────▼───────┐     ┌───────▼───────┐
                      │    Amazon     │     │    Postgres   │
                      │      S3       │     │  (media_files │
-                     │ (Source +     │     │   profiles)  │
-                     │  Streaming)   │     └───────────────┘
+                     │ (Source + HLS │     │   profiles)  │
+                     │ + previews)   │     └───────────────┘
                      └───────────────┘
 ```
 
@@ -77,7 +77,7 @@ graph TB
         LARAVEL[Laravel Web<br/>Octane / FrankenPHP<br/>dashboard + API + control plane]
         QUEUEW[Laravel Queue + Webhook Consumer<br/>queue:listen / webhooks:consume]
         SCHED[Laravel Scheduler<br/>cron schedule:run]
-        TRANSCODER[Go Transcode Worker<br/>FFmpeg → HLS<br/>scale by # of workers]
+        TRANSCODER[Go Transcode Worker<br/>FFmpeg → HLS + poster + storyboard<br/>scale by # of workers]
         LIVE[Go Live Service<br/>RTMP ingest + live HLS]
         ANALYTICS[Go Analytics API<br/>events + query]
     end
@@ -93,7 +93,7 @@ graph TB
     BROWSER -->|HTTPS dashboard + API| LARAVEL
     BROWSER -->|direct multipart upload| S3SRC
     BROWSER -->|HLS playback| CDN
-    CDN -->|origin pull · VOD HLS| S3STR
+    CDN -->|origin pull · VOD HLS + previews| S3STR
     CDN -->|origin pull · live HLS| LIVE
     OBS -->|RTMP publish| LIVE
 
@@ -109,7 +109,7 @@ graph TB
     TRANSCODER -->|BRPOP jobs| REDIS
     TRANSCODER --> PG
     TRANSCODER -->|download source| S3SRC
-    TRANSCODER -->|upload HLS| S3STR
+    TRANSCODER -->|upload HLS + preview assets| S3STR
 
     LIVE --> PG
     LIVE --> ANALYTICS
@@ -125,7 +125,7 @@ graph TB
 | **Laravel web (dashboard + API + control plane)** | Octane / FrankenPHP container behind a load balancer | Horizontal (stateless HTTP) — add replicas | Session in Redis/DB so replicas share state. No request state in singletons (Octane rule). |
 | **Laravel queue + webhook consumer** | Long-running worker container(s) | Horizontal — add workers for more throughput | Runs `queue:listen` + `webhooks:consume`. Restart on deploy to pick up new code. |
 | **Laravel scheduler** | A single cron entry (`schedule:run`) | Run exactly **one** instance | Do not run multiple — duplicate scheduled tasks. |
-| **Go transcode worker** | Standalone binary, CPU/GPU-optimized nodes | Horizontal — more workers and/or `WORKER_CONCURRENCY` | FFmpeg is CPU/GPU heavy; isolate from web nodes so transcoding never starves the dashboard. Scale to match queue depth. |
+| **Go transcode worker** | Standalone binary, CPU/GPU-optimized nodes | Horizontal — more workers and/or `WORKER_CONCURRENCY` | One FFmpeg process per job produces every HLS rendition and optional poster/storyboard assets. Isolate it from web nodes and scale to queue depth. |
 | **Go live service** | Standalone binary with public RTMP + HLS ports | Per-stream / per-region; sticky by stream | Stateful per active broadcast (local HLS root). Put a CDN in front of HLS. Co-locate near publishers to cut latency. |
 | **Go analytics API** | Standalone private Go HTTP service | Horizontal API replicas; independent PostgreSQL pool | Owns viewer event ingestion and day/month/year analytics reads. |
 | **Postgres** | Managed instance (e.g. RDS / Cloud SQL) | Vertical + read replicas | Control-plane database for Laravel, queue, and live lifecycle. |
@@ -214,7 +214,7 @@ The manual network connection survives restarts, but it must be repeated if the 
 Open the RustFS console, sign in with the access key and secret key selected above, and create:
 
 - `oxygen-source` for original browser uploads
-- `oxygen-streaming` for transcoded HLS output
+- `oxygen-streaming` for transcoded HLS, poster, and storyboard/VTT output
 
 The source bucket must allow browser requests from `http://localhost:8000`. Its S3 CORS policy must allow `PUT`, `GET`, `POST`, and `HEAD`, allow request headers, and expose the `ETag` response header. Oxygen needs `ETag` to complete multipart uploads.
 
@@ -290,7 +290,7 @@ Oxygen is **not a single process**. A full local stack runs the Laravel web app 
 | 2 | Vite dev server | `npm run dev` | Frontend hot reload (dev only) |
 | 3 | Laravel queue worker | `php artisan queue:listen` | Webhook delivery jobs, mail, etc. |
 | 4 | Webhook consumer | `php artisan webhooks:consume` | Turns Go/Laravel webhook events into delivery jobs |
-| 5 | Go transcode worker | `go run ./cmd/worker` (in `golang-queue/`) | VOD transcoding (ffmpeg → HLS) |
+| 5 | Go transcode worker | `go run ./cmd/worker` (in `golang-queue/`) | VOD transcoding (FFmpeg → HLS + optional poster/storyboard) |
 | 6 | Go live service | `go run ./cmd/live` (in `golang-live/`) | Live streaming (RTMP ingest + HLS) |
 | 7 | Laravel scheduler | `php artisan schedule:work` | Periodic tasks — daily prune of old viewer rollups (`rollups:prune`) |
 | 8 | Go analytics API | `go run ./cmd/analytics serve` (in `golang-analytics/`) | Isolated viewer event ingestion and analytics reads |
@@ -334,7 +334,7 @@ CACHE_STORE=redis
 REDIS_DB=0          # default connection — queues live here
 REDIS_CACHE_DB=1    # cache connection — separate DB so cache:clear can't wipe jobs
 
-# S3 (source uploads + streaming output)
+# S3 (source uploads + HLS/preview output)
 AWS_ACCESS_KEY_ID=...
 AWS_SECRET_ACCESS_KEY=...
 AWS_DEFAULT_REGION=us-east-1
@@ -397,9 +397,14 @@ DB_DATABASE=oxygen
 SOURCE_AWS_BUCKET=oxygen-source
 STREAMING_AWS_BUCKET=oxygen-streaming
 FFMPEG_BIN=ffmpeg
+THUMBNAIL_INTERVAL_SECONDS=10
+THUMBNAIL_WIDTH=160
+THUMBNAIL_COLUMNS=10
+THUMBNAIL_ROWS=10
+THUMBNAIL_POSTER_WIDTH=960
 ```
 
-The worker BRPOPs from `QUEUE_KEY`, reads the profile from Postgres, runs ffmpeg, and uploads the HLS tree to the streaming bucket.
+The worker BRPOPs from `QUEUE_KEY`, reads the snapshotted quality profile from Postgres, probes duration and display aspect ratio, runs one FFmpeg process, and uploads the HLS tree plus any requested poster/storyboard assets to the streaming bucket. See [Transcoding Pipeline](#transcoding-pipeline) for the output contract.
 
 ### Step 5 — Start the Go live service (new terminal, optional)
 
@@ -470,6 +475,7 @@ sequenceDiagram
     participant B as Browser
     participant L as Laravel
     participant C as Redis Cache
+    participant R as Redis Job Queue
     participant S3 as S3 (Source)
 
     B->>L: POST /multipart/init {file_name, folder_id, profile_id}
@@ -477,7 +483,7 @@ sequenceDiagram
     L->>L: Generate S3 key: media/{org_id}/{uuid}.{ext}
     L->>S3: CreateMultipartUpload
     S3-->>L: UploadId
-    L->>C: Cache upload context (24h TTL)
+    L->>C: Cache upload context + profile generate_thumbnail (24h TTL)
     L-->>B: {upload_id, key}
 
     loop For each 5MB chunk
@@ -495,7 +501,8 @@ sequenceDiagram
     L->>S3: CompleteMultipartUpload
     L->>S3: headObject (get file size)
     L->>L: DB txn: create MediaFile + MediaFileProfile
-    L->>L: dispatchTranscodeJob() → LPUSH to Redis
+    L->>L: Build job with generate_thumbnail snapshot
+    L->>R: LPUSH transcode job
     L->>C: Evict cache entry
     L-->>B: {ok: true}
 ```
@@ -506,10 +513,23 @@ sequenceDiagram
 
 The Go worker is a standalone binary. It shares Postgres, Redis, and S3 with Laravel but makes no HTTP calls to it.
 
+Laravel pushes the media row plus the profile-derived preview flag. The worker trusts the job for routing identifiers and `generate_thumbnail`, but re-reads the organization-scoped media row and quality snapshot from Postgres:
+
+```json
+{
+  "id": "media-file-uuid",
+  "organization_id": "organization-uuid",
+  "file_path": "media/organization-uuid/source.mp4",
+  "generate_thumbnail": true
+}
+```
+
+The flag is backward-compatible: missing is equivalent to `false`.
+
 ```mermaid
 flowchart TD
     BRPOP[BRPOP from Redis queue<br/>30s timeout] --> DECODE[Decode JSON payload]
-    DECODE --> |Missing id or org_id| DROP[Log error, drop job]
+    DECODE --> |Missing id or organization_id| DROP[Log error, drop job]
     DECODE --> LOAD_MF[Load media_files row from Postgres<br/>WHERE id=$1 AND organization_id=$2]
 
     LOAD_MF --> |Not found / org mismatch| DROP
@@ -526,14 +546,23 @@ flowchart TD
     URL --> |Yes| USE_URL[Use remote URL directly]
     URL --> |No| FAIL
 
-    DOWNLOAD --> TRANSCODE
-    USE_URL --> TRANSCODE[Run ffmpeg<br/>single invocation, all renditions]
+    DOWNLOAD --> PROBE[Probe duration + display aspect ratio<br/>including SAR and rotation]
+    USE_URL --> PROBE
+    PROBE --> PREP{generate_thumbnail?}
+    PREP --> |No| TRANSCODE[Run one FFmpeg process<br/>all HLS renditions]
+    PREP --> |Yes| PLAN[Plan bounded storyboard<br/>derive cell + poster heights]
+    PLAN --> TRANSCODE_PREVIEW[Run one FFmpeg process<br/>HLS + frame-zero poster + storyboard]
 
     TRANSCODE --> |Error| FAIL
-    TRANSCODE --> UPLOAD[Upload HLS tree to streaming S3]
+    TRANSCODE_PREVIEW --> |Error| FAIL
+    TRANSCODE --> UPLOAD[Upload mandatory HLS tree]
+    TRANSCODE_PREVIEW --> UPLOAD
 
     UPLOAD --> |Error| FAIL
-    UPLOAD --> SUCCESS[Set status=success<br/>progress=100<br/>streaming_url=url]
+    UPLOAD --> OPTIONAL{Preview outputs requested?}
+    OPTIONAL --> |No| SUCCESS[Set status=success<br/>progress=100<br/>streaming_url=url]
+    OPTIONAL --> |Yes| PREVIEW[Validate + upload thumbnail.jpg<br/>storyboard.jpg + storyboard.vtt]
+    PREVIEW --> |Success or optional failure| SUCCESS
 
     FAIL --> CLEANUP[cleanup temp dir]
     SUCCESS --> CLEANUP
@@ -544,22 +573,49 @@ flowchart TD
 
 ### Single FFmpeg Invocation
 
-All renditions are produced in **one ffmpeg call** using `filter_complex` with `split=N` to avoid re-decoding the source:
+Every job uses **one FFmpeg call** so the source is decoded once. With thumbnails disabled, the video graph uses `split=N` for the selected HLS renditions. With `generate_thumbnail: true`, it uses `split=N+2`: one additional branch builds the bounded storyboard, and one selects frame zero for the player poster.
 
-```
-ffmpeg -i source.mp4 \
-  -filter_complex "[0:v]split=2[v0][v1];[v0]scale=1280:720[vout0];[v1]scale=1920:1080[vout1]" \
-  -map "[vout0]" -c:v:0 libx264 -b:v:0 2800k \
-  -map "[vout1]" -c:v:1 libx264 -b:v:1 5000k \
-  -map a:0 -c:a:0 aac -b:a:0 128k \
-  -map a:0 -c:a:1 aac -b:a:1 128k \
-  -f hls -hls_time 6 -hls_playlist_type vod \
-  -var_stream_map "v:0,a:0 v:1,a:1" \
-  -master_pl_name main.m3u8
-  output/hls/v%v/segment_%d.ts
+```text
+[0:v]split=N+2[v0]...[vN-1][vthumb][vposter]
+
+[v0]...                                  -> HLS rendition 0
+[vN-1]...                               -> HLS rendition N-1
+[vthumb]fps + scale + setsar + tile     -> thumbnails/storyboard.jpg
+[vposter]select frame 0 + scale + setsar -> thumbnail.jpg
 ```
 
-Progress is parsed from `out_time_us=` on stdout, capped at 99 during encoding, and written to Postgres with a 2-second throttle.
+The poster defaults to width 960. Storyboard cells default to width 160. Their heights are calculated per video from the display aspect ratio, including sample aspect ratio and 90/270-degree rotation, and rounded to an even pixel value. The worker does not force every source into 16:9.
+
+The storyboard uses a preferred 10-second interval and a default 10×10 grid. It contains at most 100 cells in exactly one JPEG. For long videos, the interval increases so the worker never creates additional storyboard images. Go then writes `storyboard.vtt`, mapping cue times to `#xywh` regions in that JPEG.
+
+Progress is parsed from `out_time_us=` on stdout, capped at 99 during encoding, and written to Postgres with a 2-second throttle. HLS is mandatory. Poster/storyboard validation and upload are best effort after FFmpeg and do not turn an otherwise successful HLS upload into a failed media record.
+
+### VOD Output Layout
+
+```text
+hls/{organization_id}/{media_file_id}/
+├── main.m3u8
+├── thumbnail.jpg
+├── v0/
+│   ├── playlist.m3u8
+│   └── segment_0.ts
+├── vN/
+│   └── ...
+└── thumbnails/
+    ├── storyboard.jpg
+    └── storyboard.vtt
+```
+
+The root-level poster can be used directly by a player:
+
+```html
+<video
+    controls
+    poster="{STREAMING_AWS_URL}/{HLS_PREFIX}/{organization_id}/{media_file_id}/thumbnail.jpg"
+></video>
+```
+
+`storyboard.vtt` always references `storyboard.jpg` by relative filename. Object content types are `image/jpeg` for both images and `text/vtt; charset=utf-8` for the VTT. The storyboard JPEG is uploaded before its VTT so a cue file is not exposed before the referenced image exists. Poster upload is independent from storyboard publication.
 
 ## Webhook Notification System
 
@@ -719,7 +775,9 @@ The Go live service accepts the OBS RTMP publish, validates the publish name aga
 
 ## Quality & Profile System
 
-Each organization defines **profiles** — named sets of quality levels. When a file is uploaded, the profile's qualities are **snapshotted** into `media_file_profiles`, so editing a profile later doesn't affect in-flight or completed jobs.
+Each organization defines **profiles** — named sets of quality levels plus a `generate_thumbnail` option. When a file is uploaded, qualities are snapshotted into `media_file_profiles`. The thumbnail option is snapshotted into the multipart upload context and then sent as `generate_thumbnail` in the Redis job. Editing a profile later therefore does not change an already initialized upload or queued transcode.
+
+When `generate_thumbnail` is false or missing, the Go worker follows the existing HLS-only path. When true, the same FFmpeg invocation also generates `thumbnail.jpg`, `thumbnails/storyboard.jpg`, and `thumbnails/storyboard.vtt`.
 
 ```mermaid
 erDiagram
@@ -734,6 +792,7 @@ erDiagram
         string name
         json qualities "e.g. [720p, 1080p]"
         boolean is_default
+        boolean generate_thumbnail
     }
 
     MEDIA_FILE_PROFILE {
@@ -889,6 +948,7 @@ oxygen/
 │   │   ├── db/                   # pgx queries (media_files only)
 │   │   ├── s3/                   # Source download + streaming upload
 │   │   ├── transcode/            # FFmpeg command builder + progress
+│   │   ├── thumbnail/            # Aspect sizing, storyboard plan + WebVTT
 │   │   └── quality/              # Mirror of VideoQuality enum
 │   └── .env.example
 ├── golang-live/                  # Standalone Go live-stream service
