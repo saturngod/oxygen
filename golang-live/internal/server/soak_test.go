@@ -66,7 +66,7 @@ func runLiveStreamSoak(t *testing.T, adaptive bool) {
 		case "/internal/live/auth-publish":
 			qualities := `[]`
 			if adaptive {
-				qualities = `["360p"]`
+				qualities = `["720p","480p"]`
 			}
 			_, _ = fmt.Fprintf(w, `{"allowed":true,"stream":{"id":"00000000-0000-0000-0000-000000000012","organization_id":"00000000-0000-0000-0000-000000000011","public_id":"soak-stream","qualities":%s}}`, qualities)
 		case "/internal/live/session-started":
@@ -134,7 +134,7 @@ func runLiveStreamSoak(t *testing.T, adaptive bool) {
 		"-t", ffmpegDurationArgument(duration),
 		"-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
 		"-pix_fmt", "yuv420p", "-g", "60", "-keyint_min", "60", "-sc_threshold", "0",
-		"-c:a", "aac", "-b:a", "96k", "-f", "flv", publishURL,
+		"-c:a", "aac", "-b:a", "96k", "-output_ts_offset", "60", "-f", "flv", publishURL,
 	)
 	publisher.Stderr = os.Stderr
 	if err := publisher.Start(); err != nil {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -163,6 +164,28 @@ func TestLiveFFmpegWritesVariantInitializationFiles(t *testing.T) {
 		}
 		assertContains(t, string(playlist), "URI=\""+initName+"\"")
 		assertContains(t, string(playlist), ".m4s")
+	}
+}
+
+func TestH264RelayFiltersConfigurationAndPreservesUpdatedParameterSets(t *testing.T) {
+	filter := h264RelayFilter{}
+	sps := []byte{0x67, 0x01}
+	pps := []byte{0x68, 0x02}
+	if got := filter.process([][]byte{sps, pps}); got != nil {
+		t.Fatal("configuration-only callback must not become a video frame")
+	}
+	sps[1] = 0xff
+	keyframe := []byte{0x65, 0x03}
+	want := [][]byte{{0x67, 0x01}, pps, keyframe}
+	if got := filter.process([][]byte{keyframe}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("keyframe configuration: got %v, want %v", got, want)
+	}
+	frame := [][]byte{{0x41, 0x04}}
+	if got := filter.process(frame); !reflect.DeepEqual(got, frame) {
+		t.Fatal("non-keyframe changed")
+	}
+	if got := filter.process([][]byte{nil, {0x06, 0x05}}); got != nil {
+		t.Fatal("empty/SEI-only callback must not become a video frame")
 	}
 }
 

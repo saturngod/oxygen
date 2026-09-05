@@ -285,9 +285,14 @@ func wireRTMPToWriter(
 	}
 
 	for _, track := range reader.Tracks() {
-		switch track.Codec.(type) {
+		switch codec := track.Codec.(type) {
 		case *rtmpcodecs.H264:
+			filter := h264RelayFilter{sps: codec.SPS, pps: codec.PPS}
 			reader.OnDataH264(track, func(pts time.Duration, dts time.Duration, au [][]byte) {
+				au = filter.process(au)
+				if au == nil {
+					return
+				}
 				write(func() error { return writer.WriteH264(track, pts, dts, au) })
 			})
 		case *rtmpcodecs.H265:
@@ -304,6 +309,35 @@ func wireRTMPToWriter(
 			})
 		}
 	}
+}
+
+// Reader callbacks include sequence headers containing only SPS/PPS. These are
+// codec configuration, not pictures; forwarding them as RTMP video AUs gives
+// FFmpeg empty frames and can introduce a timestamp unrelated to the media.
+type h264RelayFilter struct {
+	sps []byte
+	pps []byte
+}
+
+func (filter *h264RelayFilter) process(au [][]byte) [][]byte {
+	hasPicture := false
+	for _, nalu := range au {
+		if len(nalu) == 0 {
+			continue
+		}
+		switch nalu[0] & 0x1f {
+		case 1, 2, 3, 4, 5:
+			hasPicture = true
+		case 7:
+			filter.sps = append([]byte(nil), nalu...)
+		case 8:
+			filter.pps = append([]byte(nil), nalu...)
+		}
+	}
+	if !hasPicture {
+		return nil
+	}
+	return withH264ParameterSets(au, filter.sps, filter.pps)
 }
 
 func watchAdaptiveHLS(ctx context.Context, output *adaptiveHLS, root string, timeout time.Duration) {

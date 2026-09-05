@@ -268,6 +268,7 @@ func (s *Server) handleRTMPConnInner(ctx context.Context, conn net.Conn) error {
 	defer func() {
 		if adaptive != nil {
 			if failure := adaptive.currentFailure(); failure != nil {
+				s.log.Warn("adaptive live session failed", "public_id", publicID, "err", failure)
 				s.failRTMPSession(publicID, startResp.SessionID, failure)
 				return
 			}
