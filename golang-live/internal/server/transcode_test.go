@@ -37,12 +37,14 @@ func TestBuildLiveFFmpegArgsCreatesAdaptiveMasterPlaylist(t *testing.T) {
 	assertContains(t, joined, "[v1]scale=w=1280:h=720[vout1]")
 	assertContains(t, joined, "-var_stream_map v:0,a:0 v:1,a:1")
 	assertContains(t, joined, "-master_pl_name index.m3u8")
-	assertContains(t, joined, "-hls_list_size 15")
-	assertContains(t, joined, "-hls_delete_threshold 10")
+	assertContains(t, joined, "-hls_list_size 8")
+	assertContains(t, joined, "-hls_delete_threshold 5")
 	assertContains(t, joined, "-hls_fmp4_init_filename run-a1b2_init_%v.mp4")
 	assertContains(t, joined, "run-a1b2_segment_%09d.m4s")
 	assertContains(t, joined, "-rtmp_live live -rtmp_buffer 0 -analyzeduration 1000000 -probesize 1048576 -i")
-	assertContains(t, joined, "-g:v:0 60")
+	assertContains(t, joined, "-g:v:0 120")
+	assertContains(t, joined, "-force_key_frames:v:0 expr:gte(t,n_forced*2)")
+	assertContains(t, joined, "-force_key_frames:v:1 expr:gte(t,n_forced*2)")
 	assertContains(t, joined, "-bf:v:0 0")
 	assertContains(t, joined, filepath.Join(outputDir, "v%v", "playlist.m3u8"))
 }
@@ -264,6 +266,7 @@ func TestBuildLiveFFmpegArgsSupportsVideoOnlySingleRendition(t *testing.T) {
 
 	assertContains(t, joined, "[0:v]scale=w=352:h=240[vout0]")
 	assertContains(t, joined, "-c:v:0 h264_videotoolbox")
+	assertContains(t, joined, "-force_key_frames:v:0 expr:gte(t,n_forced*2)")
 	assertContains(t, joined, "-var_stream_map v:0")
 	if strings.Contains(joined, "-c:a:") {
 		t.Fatalf("video-only args unexpectedly contain audio encoding: %s", joined)

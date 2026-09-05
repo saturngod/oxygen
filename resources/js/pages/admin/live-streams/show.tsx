@@ -374,8 +374,8 @@ function LivePlayer({
 
             const instance = new Hls({
                 lowLatencyMode: false,
-                liveSyncDurationCount: 3,
-                liveMaxLatencyDurationCount: 6,
+                liveSyncDurationCount: 2,
+                liveMaxLatencyDurationCount: 4,
                 liveDurationInfinity: true,
                 maxLiveSyncPlaybackRate: 1.5,
             });

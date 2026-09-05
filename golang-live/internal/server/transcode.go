@@ -231,7 +231,10 @@ func buildLiveFFmpegArgs(
 			fmt.Sprintf("-b:v:%d", index), fmt.Sprintf("%dk", rendition.VideoBitrate),
 			fmt.Sprintf("-maxrate:v:%d", index), fmt.Sprintf("%dk", maxrate),
 			fmt.Sprintf("-bufsize:v:%d", index), fmt.Sprintf("%dk", bufsize),
-			fmt.Sprintf("-g:v:%d", index), "60",
+			fmt.Sprintf("-g:v:%d", index), "120",
+			// Keyframes on a wall-clock cadence so every publisher frame rate
+			// (24/25/30/60 fps) yields the same 2s segment cuts as -hls_time.
+			fmt.Sprintf("-force_key_frames:v:%d", index), "expr:gte(t,n_forced*2)",
 		)
 		if videoCodec == "libx264" {
 			args = append(args,
@@ -262,8 +265,8 @@ func buildLiveFFmpegArgs(
 	args = append(args,
 		"-f", "hls",
 		"-hls_time", "2",
-		"-hls_list_size", "15",
-		"-hls_delete_threshold", "10",
+		"-hls_list_size", "8",
+		"-hls_delete_threshold", "5",
 		"-hls_segment_type", "fmp4",
 		"-hls_flags", "delete_segments+independent_segments+temp_file",
 		"-hls_fmp4_init_filename", initFilename,

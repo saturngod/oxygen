@@ -209,7 +209,7 @@ func (s *Server) handleRTMPConnInner(ctx context.Context, conn net.Conn) error {
 		// Legacy streams without an encoding profile retain source-quality remuxing.
 		muxer := &gohlslib.Muxer{
 			Variant:      gohlslib.MuxerVariantFMP4,
-			SegmentCount: 15,
+			SegmentCount: 8,
 			Tracks:       hlsTracks,
 			Directory:    hlsDir,
 			OnEncodeError: func(err error) {
