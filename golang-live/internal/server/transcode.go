@@ -213,6 +213,11 @@ func buildLiveFFmpegArgs(
 		}
 	}
 
+	initFilename := mediaPrefix + "_init.mp4"
+	if len(renditions) > 1 {
+		initFilename = mediaPrefix + "_init_%v.mp4"
+	}
+
 	args = append(args,
 		"-preset", "veryfast",
 		"-tune", "zerolatency",
@@ -225,7 +230,7 @@ func buildLiveFFmpegArgs(
 		"-hls_delete_threshold", "2",
 		"-hls_segment_type", "fmp4",
 		"-hls_flags", "delete_segments+independent_segments+temp_file",
-		"-hls_fmp4_init_filename", mediaPrefix+"_init.mp4",
+		"-hls_fmp4_init_filename", initFilename,
 		"-hls_segment_filename", filepath.Join(outputDir, "v%v", mediaPrefix+"_segment_%09d.m4s"),
 		"-master_pl_name", "index.m3u8",
 	)

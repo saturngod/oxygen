@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -32,7 +34,7 @@ func TestBuildLiveFFmpegArgsCreatesAdaptiveMasterPlaylist(t *testing.T) {
 	assertContains(t, joined, "[v1]scale=w=1280:h=720[vout1]")
 	assertContains(t, joined, "-var_stream_map v:0,a:0 v:1,a:1")
 	assertContains(t, joined, "-master_pl_name index.m3u8")
-	assertContains(t, joined, "-hls_fmp4_init_filename run-a1b2_init.mp4")
+	assertContains(t, joined, "-hls_fmp4_init_filename run-a1b2_init_%v.mp4")
 	assertContains(t, joined, "run-a1b2_segment_%09d.m4s")
 	assertContains(t, joined, filepath.Join(outputDir, "v%v", "playlist.m3u8"))
 }
@@ -126,6 +128,41 @@ func TestBuildLiveFFmpegArgsUsesDifferentMediaURLsAcrossSessions(t *testing.T) {
 	assertContains(t, second, "session-two_segment_%09d.m4s")
 	if first == second {
 		t.Fatal("expected per-session HLS media URLs")
+	}
+}
+
+func TestLiveFFmpegWritesVariantInitializationFiles(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg is required for the HLS integration test")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	input := filepath.Join(root, "input.mp4")
+	output, err := exec.CommandContext(ctx, ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=352x240:rate=30", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "3", "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", input).CombinedOutput()
+	if err != nil {
+		t.Fatalf("create input: %v\n%s", err, output)
+	}
+	render240p, _ := quality.Get("240p")
+	render360p, _ := quality.Get("360p")
+	args := buildLiveFFmpegArgs(input, root, []quality.Rendition{render240p, render360p}, true, "libx264", "integration")
+	if output, err := exec.CommandContext(ctx, ffmpeg, args...).CombinedOutput(); err != nil {
+		t.Fatalf("transcode adaptive HLS: %v\n%s", err, output)
+	}
+	for index := 0; index < 2; index++ {
+		variantDir := filepath.Join(root, fmt.Sprintf("v%d", index))
+		initName := fmt.Sprintf("integration_init_%d.mp4", index)
+		info, err := os.Stat(filepath.Join(variantDir, initName))
+		if err != nil || info.Size() == 0 {
+			t.Fatalf("missing or empty variant init file %s: %v", initName, err)
+		}
+		playlist, err := os.ReadFile(filepath.Join(variantDir, "playlist.m3u8"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertContains(t, string(playlist), "URI=\""+initName+"\"")
+		assertContains(t, string(playlist), ".m4s")
 	}
 }
 
