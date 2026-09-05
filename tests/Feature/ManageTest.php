@@ -108,7 +108,10 @@ test('folder creation requires a name', function () {
 
 test('authenticated user can add a video from a URL', function () {
     [$user, $org, $profile] = manageActor();
-    $profile->update(['generate_thumbnail' => true]);
+    $profile->update([
+        'generate_thumbnail' => true,
+        'video_segment_duration_seconds' => 9,
+    ]);
 
     $queuedPayloads = [];
     Redis::shouldReceive('lpush')
@@ -140,7 +143,11 @@ test('authenticated user can add a video from a URL', function () {
     expect($snapshot->profile_id)->toBe($profile->id)
         ->and($snapshot->name)->toBe('Default')
         ->and($snapshot->qualities)->toBe([VideoQuality::Hd720p->value, VideoQuality::Hd1080p->value])
+        ->and($snapshot->video_segment_duration_seconds)->toBe(9)
         ->and($queuedPayloads[config('services.transcode.queue_key')]['generate_thumbnail'])->toBeTrue();
+
+    $profile->update(['video_segment_duration_seconds' => 12]);
+    expect($snapshot->refresh()->video_segment_duration_seconds)->toBe(9);
 });
 
 test('url import requires a profile', function () {
@@ -176,6 +183,9 @@ test('url import rejects profile from another organization', function () {
 
 test('profile snapshot survives later edits to the source profile', function () {
     [$user, $org, $profile] = manageActor();
+    $profile->update(['video_segment_duration_seconds' => 9]);
+
+    Redis::shouldReceive('lpush')->twice()->andReturn(1);
 
     $this->actingAs($user)
         ->withSession(['current_organization_id' => $org->getKey()])
@@ -189,11 +199,13 @@ test('profile snapshot survives later edits to the source profile', function () 
     $profile->update([
         'name' => 'Renamed',
         'qualities' => [VideoQuality::Sd480p->value],
+        'video_segment_duration_seconds' => 12,
     ]);
 
     $snapshot = MediaFileProfile::query()->sole();
     expect($snapshot->name)->toBe('Default')
-        ->and($snapshot->qualities)->toBe([VideoQuality::Hd720p->value, VideoQuality::Hd1080p->value]);
+        ->and($snapshot->qualities)->toBe([VideoQuality::Hd720p->value, VideoQuality::Hd1080p->value])
+        ->and($snapshot->video_segment_duration_seconds)->toBe(9);
 });
 
 test('url import requires a valid url', function () {
@@ -232,12 +244,15 @@ test('url import rejects private and metadata addresses', function () {
     expect(MediaFile::query()->count())->toBe(0);
 });
 
-test('init multipart upload returns upload id and caches session', function () {
+test('multipart upload keeps the segment duration selected at initialization', function () {
     [$user, $org, $profile] = manageActor();
-    $profile->update(['generate_thumbnail' => true]);
+    $profile->update([
+        'generate_thumbnail' => true,
+        'video_segment_duration_seconds' => 11,
+    ]);
 
-    $this->mock(S3MultipartUploadManager::class)
-        ->shouldReceive('initiate')
+    $s3 = $this->mock(S3MultipartUploadManager::class);
+    $s3->shouldReceive('initiate')
         ->once()
         ->withArgs(function (string $key, string $contentType) {
             return str_ends_with($key, '.mp4') && $contentType === 'video/mp4';
@@ -261,6 +276,30 @@ test('init multipart upload returns upload id and caches session', function () {
     expect($session['profile_name'])->toBe('Default');
     expect($session['profile_qualities'])->toBe([VideoQuality::Hd720p->value, VideoQuality::Hd1080p->value]);
     expect($session['profile_generate_thumbnail'])->toBeTrue();
+    expect($session['profile_video_segment_duration_seconds'])->toBe(11);
+
+    $profile->update(['video_segment_duration_seconds' => 15]);
+
+    $s3->shouldReceive('complete')
+        ->once()
+        ->withArgs(fn (string $key, string $uploadId, array $parts): bool => str_ends_with($key, '.mp4')
+            && $uploadId === 'aws-upload-id'
+            && $parts === [['PartNumber' => 1, 'ETag' => '"etag-1"']]);
+    $s3->shouldReceive('size')->once()->andReturn(12345);
+    Redis::shouldReceive('lpush')->twice()->andReturn(1);
+
+    $this->actingAs($user)
+        ->withSession(['current_organization_id' => $org->getKey()])
+        ->postJson('/manage/files/multipart/complete', [
+            'upload_id' => 'aws-upload-id',
+            'title' => 'Promo',
+            'parts' => [
+                ['part_number' => 1, 'etag' => '"etag-1"'],
+            ],
+        ])
+        ->assertOk();
+
+    expect(MediaFileProfile::query()->sole()->video_segment_duration_seconds)->toBe(11);
 });
 
 test('init multipart upload rejects profile from another organization', function () {
@@ -410,6 +449,7 @@ test('complete creates media file and clears cache', function () {
     expect($snapshot->profile_id)->toBe($profile->id)
         ->and($snapshot->name)->toBe('Default')
         ->and($snapshot->qualities)->toBe([VideoQuality::Hd720p->value, VideoQuality::Hd1080p->value])
+        ->and($snapshot->video_segment_duration_seconds)->toBe(6)
         ->and($queuedPayloads[config('services.transcode.queue_key')]['generate_thumbnail'])->toBeFalse();
 });
 

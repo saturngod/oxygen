@@ -33,6 +33,8 @@ type Profile = {
     id: string;
     name: string;
     qualities: string[];
+    video_segment_duration_seconds: number;
+    live_segment_duration_seconds: number;
     is_default: boolean;
     created_at: string;
 };
@@ -124,6 +126,7 @@ export default function OrganizationProfiles({
                                 <TableHead className="w-32">Default</TableHead>
                                 <TableHead>Name</TableHead>
                                 <TableHead>Qualities</TableHead>
+                                <TableHead>Segment duration</TableHead>
                                 <TableHead className="w-40">Created</TableHead>
                                 <TableHead className="w-40 text-right">
                                     <span className="sr-only">Actions</span>
@@ -161,6 +164,12 @@ export default function OrganizationProfiles({
                                                 ),
                                             )}
                                         </div>
+                                    </TableCell>
+                                    <TableCell className="whitespace-nowrap text-muted-foreground">
+                                        Video{' '}
+                                        {profile.video_segment_duration_seconds}
+                                        s{' · '}Live{' '}
+                                        {profile.live_segment_duration_seconds}s
                                     </TableCell>
                                     <TableCell className="text-muted-foreground">
                                         {new Date(
@@ -206,7 +215,7 @@ export default function OrganizationProfiles({
                             {filteredProfiles.length === 0 && (
                                 <TableRow>
                                     <TableCell
-                                        colSpan={5}
+                                        colSpan={6}
                                         className="h-24 text-center"
                                     >
                                         No profiles found.

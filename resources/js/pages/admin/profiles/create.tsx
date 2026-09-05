@@ -150,6 +150,57 @@ export default function CreateProfile({
                                 />
                             </div>
 
+                            <div className="grid max-w-2xl gap-4 sm:grid-cols-2">
+                                <div className="grid gap-2">
+                                    <Label htmlFor="video_segment_duration_seconds">
+                                        Video segment duration
+                                    </Label>
+                                    <Input
+                                        id="video_segment_duration_seconds"
+                                        name="video_segment_duration_seconds"
+                                        type="number"
+                                        min={1}
+                                        max={30}
+                                        step={1}
+                                        defaultValue={6}
+                                        required
+                                    />
+                                    <p className="text-xs text-muted-foreground">
+                                        Target seconds per HLS segment for
+                                        uploaded videos.
+                                    </p>
+                                    <InputError
+                                        message={
+                                            errors.video_segment_duration_seconds
+                                        }
+                                    />
+                                </div>
+                                <div className="grid gap-2">
+                                    <Label htmlFor="live_segment_duration_seconds">
+                                        Live segment duration
+                                    </Label>
+                                    <Input
+                                        id="live_segment_duration_seconds"
+                                        name="live_segment_duration_seconds"
+                                        type="number"
+                                        min={1}
+                                        max={30}
+                                        step={1}
+                                        defaultValue={2}
+                                        required
+                                    />
+                                    <p className="text-xs text-muted-foreground">
+                                        Target seconds per HLS segment for live
+                                        streams.
+                                    </p>
+                                    <InputError
+                                        message={
+                                            errors.live_segment_duration_seconds
+                                        }
+                                    />
+                                </div>
+                            </div>
+
                             <div className="grid gap-3">
                                 <Label>Video qualities</Label>
                                 <p className="text-xs text-muted-foreground">

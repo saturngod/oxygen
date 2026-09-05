@@ -152,10 +152,15 @@ func (s *Server) handleRTMPConnInner(ctx context.Context, conn net.Conn) error {
 	}
 	defer s.releasePublisher(publicID)
 	startupStartedAt := time.Now()
-	startupCtx, cancelStartup := context.WithTimeout(ctx, s.cfg.HLSStartupTimeout)
+	segmentDurationSeconds := normalizedLiveSegmentDurationSeconds(auth.Stream.LiveSegmentDurationSeconds)
+	startupTimeout := s.cfg.HLSStartupTimeout
+	if len(auth.Stream.Qualities) > 0 {
+		startupTimeout = adaptiveHLSTimeout(startupTimeout, segmentDurationSeconds)
+	}
+	startupCtx, cancelStartup := context.WithTimeout(ctx, startupTimeout)
 	defer cancelStartup()
 
-	_ = conn.SetReadDeadline(time.Now().Add(s.cfg.HLSStartupTimeout))
+	_ = conn.SetReadDeadline(time.Now().Add(startupTimeout))
 
 	reader := &gortmplib.Reader{Conn: rtmpConn}
 	if err := reader.Initialize(); err != nil {
@@ -194,7 +199,7 @@ func (s *Server) handleRTMPConnInner(ctx context.Context, conn net.Conn) error {
 		}
 		defer s.releaseTranscoder()
 
-		adaptive, err = s.startAdaptiveHLS(ctx, reader, auth.Stream.Qualities, hlsDir, publicID, conn, stats)
+		adaptive, err = s.startAdaptiveHLS(ctx, reader, auth.Stream.Qualities, segmentDurationSeconds, hlsDir, publicID, conn, stats)
 		if err != nil {
 			return err
 		}
@@ -269,7 +274,7 @@ func (s *Server) handleRTMPConnInner(ctx context.Context, conn net.Conn) error {
 	}
 	s.log.Info("hls output ready", append(stats.snapshot(), "public_id", publicID, "elapsed", time.Since(startupStartedAt), "renditions", renditionReadiness)...)
 	if adaptive != nil {
-		adaptive.startWatchdog(ctx, hlsDir, s.cfg.FFmpegStallTimeout)
+		adaptive.startWatchdog(ctx, hlsDir, adaptiveHLSTimeout(s.cfg.FFmpegStallTimeout, segmentDurationSeconds))
 	}
 
 	var startResp SessionStartedResponse

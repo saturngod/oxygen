@@ -15,7 +15,10 @@ beforeEach(function () {
 });
 
 test('publish auth accepts valid stream credentials', function () {
-    $profile = Profile::factory()->create(['qualities' => ['360p', '720p']]);
+    $profile = Profile::factory()->create([
+        'qualities' => ['360p', '720p'],
+        'live_segment_duration_seconds' => 7,
+    ]);
     $liveStream = LiveStream::factory()
         ->for($profile->organization)
         ->create([
@@ -31,7 +34,8 @@ test('publish auth accepts valid stream credentials', function () {
         ->assertOk()
         ->assertJsonPath('allowed', true)
         ->assertJsonPath('stream.id', $liveStream->id)
-        ->assertJsonPath('stream.qualities', ['360p', '720p']);
+        ->assertJsonPath('stream.qualities', ['360p', '720p'])
+        ->assertJsonPath('stream.live_segment_duration_seconds', 7);
 });
 
 test('publish auth rejects an invalid stream key', function () {

@@ -24,7 +24,7 @@ func testRenditions(t *testing.T) []quality.Rendition {
 }
 
 func TestBuildArgsWithoutThumbnailsPreservesHLSOnlyGraph(t *testing.T) {
-	args, err := testTranscoder().buildArgs("input.mp4", testRenditions(t), "/tmp/hls", false, nil)
+	args, err := testTranscoder().buildArgs("input.mp4", testRenditions(t), "/tmp/hls", false, 6, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestBuildArgsWithSingleStoryboardOutput(t *testing.T) {
 		JPEGQuality:          5,
 	}
 
-	args, err := testTranscoder().buildArgs("input.mp4", testRenditions(t), "/tmp/hls", true, options)
+	args, err := testTranscoder().buildArgs("input.mp4", testRenditions(t), "/tmp/hls", true, 6, options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,8 +88,34 @@ func TestBuildArgsWithSingleStoryboardOutput(t *testing.T) {
 }
 
 func TestBuildArgsRejectsNoRenditions(t *testing.T) {
-	if _, err := testTranscoder().buildArgs("input.mp4", nil, "/tmp/hls", false, nil); err == nil {
+	if _, err := testTranscoder().buildArgs("input.mp4", nil, "/tmp/hls", false, 6, nil); err == nil {
 		t.Fatal("expected no-renditions error")
+	}
+}
+
+func TestBuildArgsUsesProfileSegmentDuration(t *testing.T) {
+	args, err := testTranscoder().buildArgs("input.mp4", testRenditions(t), "/tmp/hls", false, 9, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+
+	for _, want := range []string{"-hls_time 9", "-force_key_frames:v:0 expr:gte(t,n_forced*9)"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("arguments do not contain %q: %s", want, joined)
+		}
+	}
+}
+
+func TestBuildArgsDefaultsInvalidSegmentDuration(t *testing.T) {
+	args, err := testTranscoder().buildArgs("input.mp4", testRenditions(t), "/tmp/hls", false, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+
+	if !strings.Contains(joined, "-hls_time 6") {
+		t.Fatalf("invalid duration did not use the compatibility default: %s", joined)
 	}
 }
 

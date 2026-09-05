@@ -24,6 +24,8 @@ class UpdateProfileRequest extends FormRequest
             'qualities' => ['required', 'array', 'min:1'],
             'qualities.*' => ['required', 'string', Rule::enum(VideoQuality::class)],
             'generate_thumbnail' => ['required', 'boolean'],
+            'video_segment_duration_seconds' => ['required', 'integer', 'between:1,30'],
+            'live_segment_duration_seconds' => ['required', 'integer', 'between:1,30'],
         ];
     }
 }

@@ -29,11 +29,12 @@ type MediaFileRow struct {
 }
 
 type MediaFileProfileRow struct {
-	ID          string
-	MediaFileID string
-	ProfileID   *string
-	Name        string
-	Qualities   []string
+	ID                          string
+	MediaFileID                 string
+	ProfileID                   *string
+	Name                        string
+	Qualities                   []string
+	VideoSegmentDurationSeconds int
 }
 
 type Store struct {
@@ -102,7 +103,7 @@ func (s *Store) LoadMediaFile(ctx context.Context, id, organizationID string) (*
 
 func (s *Store) LoadMediaFileProfile(ctx context.Context, mediaFileID string) (*MediaFileProfileRow, error) {
 	const q = `
-		SELECT id, media_file_id, profile_id, name, qualities
+		SELECT id, media_file_id, profile_id, name, qualities, video_segment_duration_seconds
 		FROM media_file_profiles
 		WHERE media_file_id = $1
 		LIMIT 1
@@ -112,7 +113,7 @@ func (s *Store) LoadMediaFileProfile(ctx context.Context, mediaFileID string) (*
 	var p MediaFileProfileRow
 	var qualitiesJSON []byte
 
-	if err := row.Scan(&p.ID, &p.MediaFileID, &p.ProfileID, &p.Name, &qualitiesJSON); err != nil {
+	if err := row.Scan(&p.ID, &p.MediaFileID, &p.ProfileID, &p.Name, &qualitiesJSON, &p.VideoSegmentDurationSeconds); err != nil {
 		if err == pgx.ErrNoRows {
 			return nil, nil
 		}

@@ -32,6 +32,8 @@ class OrganizationProfilesController extends Controller
                     'id' => $profile->id,
                     'name' => $profile->name,
                     'qualities' => $profile->qualities,
+                    'video_segment_duration_seconds' => $profile->video_segment_duration_seconds,
+                    'live_segment_duration_seconds' => $profile->live_segment_duration_seconds,
                     'is_default' => $profile->is_default,
                     'created_at' => $profile->created_at->toIso8601String(),
                 ])
@@ -93,6 +95,8 @@ class OrganizationProfilesController extends Controller
                 'qualities' => $profile->qualities,
                 'is_default' => $profile->is_default,
                 'generate_thumbnail' => $profile->generate_thumbnail,
+                'video_segment_duration_seconds' => $profile->video_segment_duration_seconds,
+                'live_segment_duration_seconds' => $profile->live_segment_duration_seconds,
             ],
             'qualities' => VideoQuality::catalog(),
         ]);

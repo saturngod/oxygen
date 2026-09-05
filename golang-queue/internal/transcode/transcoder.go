@@ -157,7 +157,7 @@ func (t *Transcoder) probeHasAudio(ctx context.Context, inputURL string) (bool, 
 	return strings.Contains(string(out), `"codec_name"`), nil
 }
 
-func (t *Transcoder) Run(ctx context.Context, inputURL string, qualities []string, outputDir string, duration float64, thumbnailOptions *ThumbnailOptions, onProgress ProgressCallback) error {
+func (t *Transcoder) Run(ctx context.Context, inputURL string, qualities []string, outputDir string, duration float64, segmentDurationSeconds int, thumbnailOptions *ThumbnailOptions, onProgress ProgressCallback) error {
 	renditions := make([]quality.Rendition, 0, len(qualities))
 	for _, q := range qualities {
 		r, ok := quality.Get(q)
@@ -177,7 +177,7 @@ func (t *Transcoder) Run(ctx context.Context, inputURL string, qualities []strin
 		hasAudio = true
 	}
 
-	args, err := t.buildArgs(inputURL, renditions, outputDir, hasAudio, thumbnailOptions)
+	args, err := t.buildArgs(inputURL, renditions, outputDir, hasAudio, segmentDurationSeconds, thumbnailOptions)
 	if err != nil {
 		return err
 	}
@@ -249,11 +249,15 @@ func (t *Transcoder) Run(ctx context.Context, inputURL string, qualities []strin
 	return nil
 }
 
-func (t *Transcoder) buildArgs(inputURL string, renditions []quality.Rendition, outputDir string, hasAudio bool, thumbnailOptions *ThumbnailOptions) ([]string, error) {
+func (t *Transcoder) buildArgs(inputURL string, renditions []quality.Rendition, outputDir string, hasAudio bool, segmentDurationSeconds int, thumbnailOptions *ThumbnailOptions) ([]string, error) {
 	n := len(renditions)
 	if n == 0 {
 		return nil, fmt.Errorf("no valid renditions")
 	}
+	if segmentDurationSeconds < 1 || segmentDurationSeconds > 30 {
+		segmentDurationSeconds = 6
+	}
+	segmentDuration := strconv.Itoa(segmentDurationSeconds)
 	args := []string{
 		"-hide_banner", "-y",
 		"-i", inputURL,
@@ -313,6 +317,8 @@ func (t *Transcoder) buildArgs(inputURL string, renditions []quality.Rendition, 
 			fmt.Sprintf("-b:v:%d", i), fmt.Sprintf("%dk", r.VideoBitrate),
 			fmt.Sprintf("-maxrate:v:%d", i), fmt.Sprintf("%dk", maxrate),
 			fmt.Sprintf("-bufsize:v:%d", i), fmt.Sprintf("%dk", bufsize),
+			fmt.Sprintf("-g:v:%d", i), strconv.Itoa(segmentDurationSeconds*60),
+			fmt.Sprintf("-force_key_frames:v:%d", i), "expr:gte(t,n_forced*"+segmentDuration+")",
 		)
 	}
 
@@ -330,14 +336,13 @@ func (t *Transcoder) buildArgs(inputURL string, renditions []quality.Rendition, 
 
 	args = append(args,
 		"-preset", "veryfast",
-		"-g", "48",
-		"-keyint_min", "48",
+		"-keyint_min", "1",
 		"-sc_threshold", "0",
 	)
 
 	args = append(args,
 		"-f", "hls",
-		"-hls_time", "6",
+		"-hls_time", segmentDuration,
 		"-hls_playlist_type", "vod",
 		"-hls_segment_filename", filepath.Join(outputDir, "v%v", "segment_%d.ts"),
 		"-master_pl_name", "main.m3u8",

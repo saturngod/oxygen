@@ -142,12 +142,13 @@ type AuthPublishRequest struct {
 type AuthPublishResponse struct {
 	Allowed bool `json:"allowed"`
 	Stream  struct {
-		ID              string   `json:"id"`
-		OrganizationID  string   `json:"organization_id"`
-		PublicID        string   `json:"public_id"`
-		SettingsVersion int      `json:"settings_version"`
-		HLSURL          string   `json:"hls_url"`
-		Qualities       []string `json:"qualities"`
+		ID                         string   `json:"id"`
+		OrganizationID             string   `json:"organization_id"`
+		PublicID                   string   `json:"public_id"`
+		SettingsVersion            int      `json:"settings_version"`
+		HLSURL                     string   `json:"hls_url"`
+		Qualities                  []string `json:"qualities"`
+		LiveSegmentDurationSeconds int      `json:"live_segment_duration_seconds"`
 	} `json:"stream"`
 }
 

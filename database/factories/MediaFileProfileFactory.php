@@ -23,6 +23,7 @@ class MediaFileProfileFactory extends Factory
             'profile_id' => Profile::factory(),
             'name' => fake()->words(2, true),
             'qualities' => [VideoQuality::Hd720p->value, VideoQuality::Hd1080p->value],
+            'video_segment_duration_seconds' => 6,
         ];
     }
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -83,6 +84,7 @@ func (s *Server) startAdaptiveHLS(
 	ctx context.Context,
 	reader *gortmplib.Reader,
 	qualities []string,
+	segmentDurationSeconds int,
 	hlsDir string,
 	publicID string,
 	publisherConn net.Conn,
@@ -115,6 +117,7 @@ func (s *Server) startAdaptiveHLS(
 		mediaPrefix,
 		s.cfg.FFmpegAnalyzeDuration,
 		s.cfg.FFmpegProbeSize,
+		segmentDurationSeconds,
 	)
 	command := exec.CommandContext(runCtx, s.cfg.FFmpegBin, args...)
 	command.Stderr = os.Stderr
@@ -182,7 +185,7 @@ func (s *Server) startAdaptiveHLS(
 	}
 
 	wireRTMPToWriter(reader, writer, s.log, publicID, relayConn, s.cfg.FFmpegWriteTimeout, output.reportFailure, stats)
-	s.log.Info("adaptive live transcoder started", "public_id", publicID, "qualities", qualities)
+	s.log.Info("adaptive live transcoder started", "public_id", publicID, "qualities", qualities, "segment_duration_seconds", segmentDurationSeconds)
 
 	return output, nil
 }
@@ -196,7 +199,10 @@ func buildLiveFFmpegArgs(
 	mediaPrefix string,
 	analyzeDuration int,
 	probeSize int,
+	segmentDurationSeconds int,
 ) []string {
+	segmentDurationSeconds = normalizedLiveSegmentDurationSeconds(segmentDurationSeconds)
+	segmentDuration := strconv.Itoa(segmentDurationSeconds)
 	args := []string{"-hide_banner", "-loglevel", "info", "-nostats", "-y"}
 	if strings.HasPrefix(inputURL, "rtmp://") || strings.HasPrefix(inputURL, "rtmps://") {
 		args = append(args, "-rtmp_live", "live", "-rtmp_buffer", "0")
@@ -231,16 +237,14 @@ func buildLiveFFmpegArgs(
 			fmt.Sprintf("-b:v:%d", index), fmt.Sprintf("%dk", rendition.VideoBitrate),
 			fmt.Sprintf("-maxrate:v:%d", index), fmt.Sprintf("%dk", maxrate),
 			fmt.Sprintf("-bufsize:v:%d", index), fmt.Sprintf("%dk", bufsize),
-			fmt.Sprintf("-g:v:%d", index), "120",
-			// Keyframes on a wall-clock cadence so every publisher frame rate
-			// (24/25/30/60 fps) yields the same 2s segment cuts as -hls_time.
-			fmt.Sprintf("-force_key_frames:v:%d", index), "expr:gte(t,n_forced*2)",
+			fmt.Sprintf("-g:v:%d", index), strconv.Itoa(segmentDurationSeconds*60),
+			fmt.Sprintf("-force_key_frames:v:%d", index), "expr:gte(t,n_forced*"+segmentDuration+")",
 		)
 		if videoCodec == "libx264" {
 			args = append(args,
 				fmt.Sprintf("-preset:v:%d", index), "veryfast",
 				fmt.Sprintf("-tune:v:%d", index), "zerolatency",
-				fmt.Sprintf("-keyint_min:v:%d", index), "60",
+				fmt.Sprintf("-keyint_min:v:%d", index), "1",
 				fmt.Sprintf("-sc_threshold:v:%d", index), "0",
 				fmt.Sprintf("-bf:v:%d", index), "0",
 			)
@@ -264,7 +268,7 @@ func buildLiveFFmpegArgs(
 
 	args = append(args,
 		"-f", "hls",
-		"-hls_time", "2",
+		"-hls_time", segmentDuration,
 		"-hls_list_size", "8",
 		"-hls_delete_threshold", "5",
 		"-hls_segment_type", "fmp4",
@@ -287,6 +291,23 @@ func buildLiveFFmpegArgs(
 		"-var_stream_map", strings.Join(variantMap, " "),
 		filepath.Join(outputDir, "v%v", "playlist.m3u8"),
 	)
+}
+
+func normalizedLiveSegmentDurationSeconds(segmentDurationSeconds int) int {
+	if segmentDurationSeconds < 1 || segmentDurationSeconds > 30 {
+		return 2
+	}
+
+	return segmentDurationSeconds
+}
+
+func adaptiveHLSTimeout(configured time.Duration, segmentDurationSeconds int) time.Duration {
+	minimum := time.Duration(normalizedLiveSegmentDurationSeconds(segmentDurationSeconds)*3+10) * time.Second
+	if configured < minimum {
+		return minimum
+	}
+
+	return configured
 }
 
 func hasAudioTrack(tracks []*gortmplib.Track) bool {

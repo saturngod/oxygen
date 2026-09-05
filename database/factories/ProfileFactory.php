@@ -23,6 +23,8 @@ class ProfileFactory extends Factory
             'qualities' => [VideoQuality::Hd720p->value, VideoQuality::Hd1080p->value],
             'is_default' => false,
             'generate_thumbnail' => false,
+            'video_segment_duration_seconds' => 6,
+            'live_segment_duration_seconds' => 2,
         ];
     }
 }

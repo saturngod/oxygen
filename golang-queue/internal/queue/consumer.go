@@ -170,6 +170,7 @@ func (c *Consumer) handle(ctx context.Context, raw string) {
 		"media_file_id", job.ID,
 		"profile_name", profile.Name,
 		"qualities", profile.Qualities,
+		"video_segment_duration_seconds", profile.VideoSegmentDurationSeconds,
 	)
 
 	if err := c.store.UpdateProgress(ctx, job.ID, "progress", 0); err != nil {
@@ -272,7 +273,7 @@ func (c *Consumer) handle(ctx context.Context, raw string) {
 		}
 	}
 
-	err = c.transcoder.Run(ctx, sourcePath, profile.Qualities, outputDir, duration, thumbnailOptions, func(pct int) {
+	err = c.transcoder.Run(ctx, sourcePath, profile.Qualities, outputDir, duration, profile.VideoSegmentDurationSeconds, thumbnailOptions, func(pct int) {
 		if dbErr := c.store.UpdateProgress(ctx, job.ID, "progress", pct); dbErr != nil {
 			c.log.Error("update progress failed", "err", dbErr, "pct", pct)
 		}

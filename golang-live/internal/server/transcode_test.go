@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +31,7 @@ func TestBuildLiveFFmpegArgsCreatesAdaptiveMasterPlaylist(t *testing.T) {
 		"run-a1b2",
 		1000000,
 		1048576,
+		7,
 	)
 	joined := strings.Join(args, " ")
 
@@ -42,11 +45,53 @@ func TestBuildLiveFFmpegArgsCreatesAdaptiveMasterPlaylist(t *testing.T) {
 	assertContains(t, joined, "-hls_fmp4_init_filename run-a1b2_init_%v.mp4")
 	assertContains(t, joined, "run-a1b2_segment_%09d.m4s")
 	assertContains(t, joined, "-rtmp_live live -rtmp_buffer 0 -analyzeduration 1000000 -probesize 1048576 -i")
-	assertContains(t, joined, "-g:v:0 120")
-	assertContains(t, joined, "-force_key_frames:v:0 expr:gte(t,n_forced*2)")
-	assertContains(t, joined, "-force_key_frames:v:1 expr:gte(t,n_forced*2)")
+	assertContains(t, joined, "-hls_time 7")
+	assertContains(t, joined, "-force_key_frames:v:0 expr:gte(t,n_forced*7)")
+	assertContains(t, joined, "-force_key_frames:v:1 expr:gte(t,n_forced*7)")
 	assertContains(t, joined, "-bf:v:0 0")
 	assertContains(t, joined, filepath.Join(outputDir, "v%v", "playlist.m3u8"))
+}
+
+func TestBuildLiveFFmpegArgsDefaultsMissingSegmentDuration(t *testing.T) {
+	render360p, _ := quality.Get("360p")
+	joined := strings.Join(buildLiveFFmpegArgs(
+		"rtmp://127.0.0.1:1234/live/source",
+		t.TempDir(),
+		[]quality.Rendition{render360p},
+		false,
+		"libx264",
+		"compatibility",
+		1000000,
+		1048576,
+		0,
+	), " ")
+
+	assertContains(t, joined, "-hls_time 2")
+	assertContains(t, joined, "-force_key_frames:v:0 expr:gte(t,n_forced*2)")
+}
+
+func TestAdaptiveHLSTimeoutUsesSegmentDurationMinimum(t *testing.T) {
+	render360p, _ := quality.Get("360p")
+	joined := strings.Join(buildLiveFFmpegArgs(
+		"rtmp://127.0.0.1:1234/live/source",
+		t.TempDir(),
+		[]quality.Rendition{render360p},
+		false,
+		"libx264",
+		"long-segments",
+		1000000,
+		1048576,
+		30,
+	), " ")
+	assertContains(t, joined, "-hls_time 30")
+	assertContains(t, joined, "-force_key_frames:v:0 expr:gte(t,n_forced*30)")
+
+	if got := adaptiveHLSTimeout(30*time.Second, 30); got != 100*time.Second {
+		t.Fatalf("adaptive timeout = %s, want 1m40s", got)
+	}
+	if got := adaptiveHLSTimeout(2*time.Minute, 30); got != 2*time.Minute {
+		t.Fatalf("configured timeout was not preserved: %s", got)
+	}
 }
 
 func TestAdaptiveHLSWatchdogReportsMissingOutput(t *testing.T) {
@@ -262,6 +307,7 @@ func TestBuildLiveFFmpegArgsSupportsVideoOnlySingleRendition(t *testing.T) {
 		"run-c3d4",
 		1000000,
 		1048576,
+		2,
 	), " ")
 
 	assertContains(t, joined, "[0:v]scale=w=352:h=240[vout0]")
@@ -284,6 +330,7 @@ func TestBuildLiveFFmpegArgsUsesDifferentMediaURLsAcrossSessions(t *testing.T) {
 		"session-one",
 		1000000,
 		1048576,
+		2,
 	), " ")
 	second := strings.Join(buildLiveFFmpegArgs(
 		"rtmp://127.0.0.1:1234/live/source",
@@ -294,6 +341,7 @@ func TestBuildLiveFFmpegArgsUsesDifferentMediaURLsAcrossSessions(t *testing.T) {
 		"session-two",
 		1000000,
 		1048576,
+		2,
 	), " ")
 
 	assertContains(t, first, "session-one_init.mp4")
@@ -320,7 +368,7 @@ func TestLiveFFmpegWritesVariantInitializationFiles(t *testing.T) {
 	}
 	render240p, _ := quality.Get("240p")
 	render360p, _ := quality.Get("360p")
-	args := buildLiveFFmpegArgs(input, root, []quality.Rendition{render240p, render360p}, true, "libx264", "integration", 1000000, 1048576)
+	args := buildLiveFFmpegArgs(input, root, []quality.Rendition{render240p, render360p}, true, "libx264", "integration", 1000000, 1048576, 1)
 	if output, err := exec.CommandContext(ctx, ffmpeg, args...).CombinedOutput(); err != nil {
 		t.Fatalf("transcode adaptive HLS: %v\n%s", err, output)
 	}
@@ -337,6 +385,50 @@ func TestLiveFFmpegWritesVariantInitializationFiles(t *testing.T) {
 		}
 		assertContains(t, string(playlist), "URI=\""+initName+"\"")
 		assertContains(t, string(playlist), ".m4s")
+		if strings.Count(string(playlist), "#EXTINF:") < 2 {
+			t.Fatalf("expected the one-second profile duration to create multiple segments: %s", playlist)
+		}
+	}
+}
+
+func TestLiveFFmpegWritesThirtySecondSegments(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg is required for the HLS integration test")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	input := filepath.Join(root, "thirty-second-input.mp4")
+	output, err := exec.CommandContext(ctx, ffmpeg,
+		"-hide_banner", "-loglevel", "error", "-y",
+		"-f", "lavfi", "-i", "testsrc2=size=352x240:rate=25",
+		"-t", "31", "-c:v", "libx264", "-preset", "ultrafast", "-an", input,
+	).CombinedOutput()
+	if err != nil {
+		t.Fatalf("create 30-second input: %v\n%s", err, output)
+	}
+
+	render240p, _ := quality.Get("240p")
+	args := buildLiveFFmpegArgs(input, root, []quality.Rendition{render240p}, false, "libx264", "thirty-seconds", 1000000, 1048576, 30)
+	if output, err := exec.CommandContext(ctx, ffmpeg, args...).CombinedOutput(); err != nil {
+		t.Fatalf("transcode 30-second HLS: %v\n%s", err, output)
+	}
+
+	playlist, err := os.ReadFile(filepath.Join(root, "v0", "playlist.m3u8"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	matches := regexp.MustCompile(`#EXTINF:([0-9.]+)`).FindAllStringSubmatch(string(playlist), -1)
+	if len(matches) < 2 {
+		t.Fatalf("expected a full segment and a final short segment: %s", playlist)
+	}
+	firstDuration, err := strconv.ParseFloat(matches[0][1], 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstDuration < 29.5 || firstDuration > 30.5 {
+		t.Fatalf("first segment duration = %.3f, want about 30 seconds", firstDuration)
 	}
 }
 

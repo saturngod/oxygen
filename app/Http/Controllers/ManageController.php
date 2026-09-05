@@ -210,6 +210,7 @@ class ManageController extends Controller
             'profile_name' => $profile->name,
             'profile_qualities' => $profile->qualities,
             'profile_generate_thumbnail' => $profile->generate_thumbnail,
+            'profile_video_segment_duration_seconds' => $profile->video_segment_duration_seconds,
         ], now()->addHours(24));
 
         return response()->json([
@@ -276,6 +277,7 @@ class ManageController extends Controller
                 'profile_id' => $session['profile_id'],
                 'name' => $session['profile_name'],
                 'qualities' => $session['profile_qualities'],
+                'video_segment_duration_seconds' => $session['profile_video_segment_duration_seconds'] ?? 6,
             ]);
 
             return $mediaFile;
@@ -323,15 +325,16 @@ class ManageController extends Controller
             'profile_id' => $profile->id,
             'name' => $profile->name,
             'qualities' => $profile->qualities,
+            'video_segment_duration_seconds' => $profile->video_segment_duration_seconds,
         ]);
     }
 
     /**
-     * @return array{organization_id: string, user_id: int|string|null, folder_id: ?string, key: string, file_name: string, profile_id: string, profile_name: string, profile_qualities: array<int, string>, profile_generate_thumbnail?: bool}
+     * @return array{organization_id: string, user_id: int|string|null, folder_id: ?string, key: string, file_name: string, profile_id: string, profile_name: string, profile_qualities: array<int, string>, profile_generate_thumbnail?: bool, profile_video_segment_duration_seconds?: int}
      */
     private function authorizeUploadSession(Request $request, string $uploadId): array
     {
-        /** @var array{organization_id: string, user_id: int|string|null, folder_id: ?string, key: string, file_name: string, profile_id: string, profile_name: string, profile_qualities: array<int, string>, profile_generate_thumbnail?: bool}|null $session */
+        /** @var array{organization_id: string, user_id: int|string|null, folder_id: ?string, key: string, file_name: string, profile_id: string, profile_name: string, profile_qualities: array<int, string>, profile_generate_thumbnail?: bool, profile_video_segment_duration_seconds?: int}|null $session */
         $session = Cache::get($this->uploadCacheKey($uploadId));
 
         abort_if($session === null, 404, 'Upload session not found.');

@@ -74,7 +74,7 @@ func TestTranscodeProducesHLSStoryboardAndPoster(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = transcoder.Run(ctx, sourcePath, []string{"240p"}, hlsDir, mediaInfo.Duration, &ThumbnailOptions{
+	err = transcoder.Run(ctx, sourcePath, []string{"240p"}, hlsDir, mediaInfo.Duration, 1, &ThumbnailOptions{
 		StoryboardOutputPath: filepath.Join(thumbnailDir, thumbnail.StoryboardFilename),
 		PosterOutputPath:     filepath.Join(dir, thumbnail.PosterFilename),
 		PosterWidth:          960,
@@ -99,6 +99,9 @@ func TestTranscodeProducesHLSStoryboardAndPoster(t *testing.T) {
 	segments, err := filepath.Glob(filepath.Join(hlsDir, "v0", "segment_*.ts"))
 	if err != nil || len(segments) == 0 {
 		t.Fatalf("expected HLS segments: %v", err)
+	}
+	if len(segments) < 2 {
+		t.Fatalf("expected the one-second profile duration to create multiple segments, got %d", len(segments))
 	}
 
 	storyboards, err := filepath.Glob(filepath.Join(thumbnailDir, "*.jpg"))

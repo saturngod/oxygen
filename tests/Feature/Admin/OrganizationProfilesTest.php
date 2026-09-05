@@ -12,12 +12,20 @@ uses(RefreshDatabase::class);
 test('admin can view organization profiles page', function () {
     $user = User::factory()->create(['email_verified_at' => now()]);
     $org = Organization::factory()->create();
+    Profile::factory()->for($org)->create([
+        'video_segment_duration_seconds' => 8,
+        'live_segment_duration_seconds' => 3,
+    ]);
 
     $org->users()->attach($user, ['role' => OrganizationRole::Admin->value]);
 
     $this->actingAs($user)
         ->get(route('admin.organizations.profiles.index', $org))
-        ->assertSuccessful();
+        ->assertSuccessful()
+        ->assertInertia(fn ($page) => $page
+            ->where('profiles.0.video_segment_duration_seconds', 8)
+            ->where('profiles.0.live_segment_duration_seconds', 3)
+        );
 });
 
 test('operator cannot view organization profiles page', function () {
@@ -65,6 +73,8 @@ test('admin can create a profile with selected qualities', function () {
             VideoQuality::Hd1080p->value,
         ],
         'generate_thumbnail' => true,
+        'video_segment_duration_seconds' => 8,
+        'live_segment_duration_seconds' => 3,
     ];
 
     $this->actingAs($user)
@@ -75,7 +85,9 @@ test('admin can create a profile with selected qualities', function () {
 
     expect($profile->name)->toBe('Standard Web Delivery')
         ->and($profile->qualities)->toEqualCanonicalizing($payload['qualities'])
-        ->and($profile->generate_thumbnail)->toBeTrue();
+        ->and($profile->generate_thumbnail)->toBeTrue()
+        ->and($profile->video_segment_duration_seconds)->toBe(8)
+        ->and($profile->live_segment_duration_seconds)->toBe(3);
 });
 
 test('profile requires at least one quality', function () {
@@ -90,6 +102,8 @@ test('profile requires at least one quality', function () {
             'name' => 'Empty Profile',
             'qualities' => [],
             'generate_thumbnail' => false,
+            'video_segment_duration_seconds' => 6,
+            'live_segment_duration_seconds' => 2,
         ])
         ->assertSessionHasErrors('qualities');
 
@@ -108,6 +122,8 @@ test('profile rejects unknown quality values', function () {
             'name' => 'Bad Profile',
             'qualities' => ['9001p'],
             'generate_thumbnail' => false,
+            'video_segment_duration_seconds' => 6,
+            'live_segment_duration_seconds' => 2,
         ])
         ->assertSessionHasErrors('qualities.0');
 });
@@ -124,10 +140,59 @@ test('profile rejects a non-boolean thumbnail option', function () {
             'name' => 'Invalid Thumbnail Profile',
             'qualities' => [VideoQuality::Hd720p->value],
             'generate_thumbnail' => 'sometimes',
+            'video_segment_duration_seconds' => 6,
+            'live_segment_duration_seconds' => 2,
         ])
         ->assertSessionHasErrors('generate_thumbnail');
 
     expect(Profile::query()->count())->toBe(0);
+});
+
+test('profile segment durations must be whole seconds between 1 and 30', function (string $field, mixed $value) {
+    $user = User::factory()->create(['email_verified_at' => now()]);
+    $org = Organization::factory()->create();
+
+    $org->users()->attach($user, ['role' => OrganizationRole::Admin->value]);
+
+    $payload = [
+        'name' => 'Invalid Duration Profile',
+        'qualities' => [VideoQuality::Hd720p->value],
+        'generate_thumbnail' => false,
+        'video_segment_duration_seconds' => 6,
+        'live_segment_duration_seconds' => 2,
+    ];
+    $payload[$field] = $value;
+
+    $this->actingAs($user)
+        ->post(route('admin.organizations.profiles.store', $org), $payload)
+        ->assertSessionHasErrors($field);
+
+    expect(Profile::query()->count())->toBe(0);
+})->with([
+    'video below minimum' => ['video_segment_duration_seconds', 0],
+    'video above maximum' => ['video_segment_duration_seconds', 31],
+    'live fractional' => ['live_segment_duration_seconds', 1.5],
+]);
+
+test('profile segment duration boundaries are accepted', function () {
+    $user = User::factory()->create(['email_verified_at' => now()]);
+    $org = Organization::factory()->create();
+
+    $org->users()->attach($user, ['role' => OrganizationRole::Admin->value]);
+
+    $this->actingAs($user)
+        ->post(route('admin.organizations.profiles.store', $org), [
+            'name' => 'Boundary Duration Profile',
+            'qualities' => [VideoQuality::Hd720p->value],
+            'generate_thumbnail' => false,
+            'video_segment_duration_seconds' => 1,
+            'live_segment_duration_seconds' => 30,
+        ])
+        ->assertRedirect();
+
+    $profile = Profile::query()->sole();
+    expect($profile->video_segment_duration_seconds)->toBe(1)
+        ->and($profile->live_segment_duration_seconds)->toBe(30);
 });
 
 test('first profile is automatically marked as default', function () {
@@ -141,6 +206,8 @@ test('first profile is automatically marked as default', function () {
             'name' => 'Primary',
             'qualities' => [VideoQuality::Hd720p->value],
             'generate_thumbnail' => false,
+            'video_segment_duration_seconds' => 6,
+            'live_segment_duration_seconds' => 2,
         ])
         ->assertRedirect();
 
@@ -163,6 +230,8 @@ test('additional profiles are not default when one already exists', function () 
             'name' => 'Second',
             'qualities' => [VideoQuality::Hd720p->value],
             'generate_thumbnail' => false,
+            'video_segment_duration_seconds' => 6,
+            'live_segment_duration_seconds' => 2,
         ])
         ->assertRedirect();
 
@@ -229,6 +298,8 @@ test('operator cannot create a profile', function () {
             'name' => 'Unauthorized',
             'qualities' => [VideoQuality::Hd720p->value],
             'generate_thumbnail' => false,
+            'video_segment_duration_seconds' => 6,
+            'live_segment_duration_seconds' => 2,
         ])
         ->assertForbidden();
 });
@@ -242,6 +313,8 @@ test('admin can view profile edit page', function () {
     $profile = Profile::factory()->for($org)->create([
         'name' => 'Test Profile',
         'generate_thumbnail' => true,
+        'video_segment_duration_seconds' => 6,
+        'live_segment_duration_seconds' => 2,
     ]);
 
     $this->actingAs($user)
@@ -262,12 +335,16 @@ test('admin can update a profile name and qualities', function () {
         'name' => 'Old Name',
         'qualities' => [VideoQuality::Hd720p->value],
         'generate_thumbnail' => false,
+        'video_segment_duration_seconds' => 6,
+        'live_segment_duration_seconds' => 2,
     ]);
 
     $payload = [
         'name' => 'Updated Name',
         'qualities' => [VideoQuality::Hd720p->value, VideoQuality::Hd1080p->value],
         'generate_thumbnail' => true,
+        'video_segment_duration_seconds' => 10,
+        'live_segment_duration_seconds' => 4,
     ];
 
     $this->actingAs($user)
@@ -278,7 +355,9 @@ test('admin can update a profile name and qualities', function () {
 
     expect($profile->name)->toBe('Updated Name')
         ->and($profile->qualities)->toEqualCanonicalizing($payload['qualities'])
-        ->and($profile->generate_thumbnail)->toBeTrue();
+        ->and($profile->generate_thumbnail)->toBeTrue()
+        ->and($profile->video_segment_duration_seconds)->toBe(10)
+        ->and($profile->live_segment_duration_seconds)->toBe(4);
 });
 
 test('update is scoped to the organization', function () {
@@ -295,6 +374,8 @@ test('update is scoped to the organization', function () {
             'name' => 'Hacked',
             'qualities' => [VideoQuality::Hd720p->value],
             'generate_thumbnail' => true,
+            'video_segment_duration_seconds' => 6,
+            'live_segment_duration_seconds' => 2,
         ])
         ->assertNotFound();
 
@@ -314,6 +395,8 @@ test('operator cannot update a profile', function () {
             'name' => 'Changed',
             'qualities' => [VideoQuality::Hd720p->value],
             'generate_thumbnail' => true,
+            'video_segment_duration_seconds' => 6,
+            'live_segment_duration_seconds' => 2,
         ])
         ->assertForbidden();
 

@@ -9,7 +9,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
-#[Fillable(['media_file_id', 'profile_id', 'name', 'qualities'])]
+#[Fillable(['media_file_id', 'profile_id', 'name', 'qualities', 'video_segment_duration_seconds'])]
 class MediaFileProfile extends Model
 {
     /** @use HasFactory<MediaFileProfileFactory> */
@@ -22,6 +22,7 @@ class MediaFileProfile extends Model
     {
         return [
             'qualities' => 'array',
+            'video_segment_duration_seconds' => 'integer',
         ];
     }
 
