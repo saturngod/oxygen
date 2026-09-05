@@ -5,6 +5,17 @@ import (
 	"time"
 )
 
+func TestLoadDefaultStallTimeout(t *testing.T) {
+	for _, value := range []string{"", "invalid", "0", "-1", "10"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("FFMPEG_OUTPUT_STALL_TIMEOUT_SECONDS", value)
+			if got := Load().FFmpegStallTimeout; got != 10*time.Second {
+				t.Fatalf("expected 10 second stall timeout, got %s", got)
+			}
+		})
+	}
+}
+
 func TestLoadProductionSafetySettings(t *testing.T) {
 	t.Setenv("LIVE_CALLBACK_ROOT", "/var/lib/oxygen-live/callbacks")
 	t.Setenv("LIVE_TRUST_PROXY_HEADERS", "true")

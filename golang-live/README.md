@@ -39,7 +39,7 @@ go run ./cmd/live
 | `MAX_RTMP_CONNECTIONS` | `1000` | Maximum concurrent RTMP sockets, including handshakes |
 | `MAX_LIVE_TRANSCODERS` | `2` | Maximum concurrent adaptive ffmpeg processes |
 | `FFMPEG_RELAY_WRITE_TIMEOUT_SECONDS` | `10` | Maximum time a media write to ffmpeg may block |
-| `FFMPEG_OUTPUT_STALL_TIMEOUT_SECONDS` | `30` | Maximum age of adaptive HLS output before the session fails |
+| `FFMPEG_OUTPUT_STALL_TIMEOUT_SECONDS` | `10` | Maximum age of adaptive HLS output before the session fails (not playback latency) |
 | `VIEWER_TTL_SECONDS` | `45` | Viewer activity window |
 | `ROLLUP_INTERVAL_SECONDS` | `15` | Snapshot flush interval |
 

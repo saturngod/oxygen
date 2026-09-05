@@ -59,7 +59,7 @@ func Load() Config {
 		MaxRTMPConnections:   intEnv("MAX_RTMP_CONNECTIONS", 1000),
 		MaxLiveTranscoders:   intEnv("MAX_LIVE_TRANSCODERS", 2),
 		FFmpegWriteTimeout:   secondsEnv("FFMPEG_RELAY_WRITE_TIMEOUT_SECONDS", 10),
-		FFmpegStallTimeout:   secondsEnv("FFMPEG_OUTPUT_STALL_TIMEOUT_SECONDS", 30),
+		FFmpegStallTimeout:   secondsEnv("FFMPEG_OUTPUT_STALL_TIMEOUT_SECONDS", 10),
 	}
 }
 
