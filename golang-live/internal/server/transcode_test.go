@@ -37,6 +37,8 @@ func TestBuildLiveFFmpegArgsCreatesAdaptiveMasterPlaylist(t *testing.T) {
 	assertContains(t, joined, "[v1]scale=w=1280:h=720[vout1]")
 	assertContains(t, joined, "-var_stream_map v:0,a:0 v:1,a:1")
 	assertContains(t, joined, "-master_pl_name index.m3u8")
+	assertContains(t, joined, "-hls_list_size 15")
+	assertContains(t, joined, "-hls_delete_threshold 10")
 	assertContains(t, joined, "-hls_fmp4_init_filename run-a1b2_init_%v.mp4")
 	assertContains(t, joined, "run-a1b2_segment_%09d.m4s")
 	assertContains(t, joined, "-rtmp_live live -rtmp_buffer 0 -analyzeduration 1000000 -probesize 1048576 -i")

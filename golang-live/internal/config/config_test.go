@@ -9,8 +9,8 @@ func TestLoadDefaultStallTimeout(t *testing.T) {
 	for _, value := range []string{"", "invalid", "0", "-1"} {
 		t.Run(value, func(t *testing.T) {
 			t.Setenv("FFMPEG_OUTPUT_STALL_TIMEOUT_SECONDS", value)
-			if got := Load().FFmpegStallTimeout; got != 10*time.Second {
-				t.Fatalf("expected 10 second stall timeout, got %s", got)
+			if got := Load().FFmpegStallTimeout; got != 30*time.Second {
+				t.Fatalf("expected 30 second stall timeout, got %s", got)
 			}
 		})
 	}

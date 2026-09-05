@@ -63,7 +63,7 @@ func Load() Config {
 		MaxLiveTranscoders:    intEnv("MAX_LIVE_TRANSCODERS", 2),
 		HLSStartupTimeout:     secondsEnv("LIVE_HLS_STARTUP_TIMEOUT_SECONDS", 30),
 		FFmpegWriteTimeout:    secondsEnv("FFMPEG_RELAY_WRITE_TIMEOUT_SECONDS", 10),
-		FFmpegStallTimeout:    secondsEnv("FFMPEG_OUTPUT_STALL_TIMEOUT_SECONDS", 10),
+		FFmpegStallTimeout:    secondsEnv("FFMPEG_OUTPUT_STALL_TIMEOUT_SECONDS", 30),
 		FFmpegAnalyzeDuration: intEnv("LIVE_FFMPEG_ANALYZE_DURATION_US", 1000000),
 		FFmpegProbeSize:       intEnv("LIVE_FFMPEG_PROBE_SIZE_BYTES", 1048576),
 	}

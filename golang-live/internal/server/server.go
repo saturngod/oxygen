@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -134,7 +136,7 @@ func New(cfg config.Config, log *slog.Logger) *Server {
 		cfg.FFmpegWriteTimeout = 10 * time.Second
 	}
 	if cfg.FFmpegStallTimeout <= 0 {
-		cfg.FFmpegStallTimeout = 10 * time.Second
+		cfg.FFmpegStallTimeout = 30 * time.Second
 	}
 	if cfg.HLSStartupTimeout <= 0 {
 		cfg.HLSStartupTimeout = 30 * time.Second
@@ -485,7 +487,20 @@ func (s *Server) hls(w http.ResponseWriter, r *http.Request) {
 
 	viewerID := s.viewerID(w, r)
 	s.tracker.Observe(publicID, viewerID, clean, time.Now())
-	setHLSCacheHeader(w, clean)
+	setHLSHeaders(w, clean)
+
+	if strings.HasSuffix(clean, ".m3u8") {
+		data, err := io.ReadAll(file)
+		if err != nil {
+			writeHLSNotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+		return
+	}
+
 	http.ServeContent(w, r, filepath.Base(clean), info.ModTime(), file)
 }
 
@@ -499,16 +514,29 @@ func writeHLSNotFound(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-// setHLSCacheHeader applies a CDN-friendly Cache-Control header based on the
-// requested file. The .m3u8 playlist changes every few seconds and must never
-// be cached stale; segments (.mp4 init/seg/part) have immutable, unique names.
-func setHLSCacheHeader(w http.ResponseWriter, name string) {
-	if strings.HasSuffix(name, ".m3u8") {
-		w.Header().Set("Cache-Control", "no-cache")
-		return
+// setHLSHeaders applies appropriate Cache-Control and Content-Type headers
+// based on the requested file type. The .m3u8 playlist changes every few seconds
+// and must never be cached by browsers or CDNs; media segments (.m4s, .mp4, .ts)
+// have immutable, unique names.
+func setHLSHeaders(w http.ResponseWriter, name string) {
+	switch {
+	case strings.HasSuffix(name, ".m3u8"):
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate, max-age=0")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
+	case strings.HasSuffix(name, ".m4s"):
+		w.Header().Set("Content-Type", "video/iso.segment")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	case strings.HasSuffix(name, ".mp4"):
+		w.Header().Set("Content-Type", "video/mp4")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	case strings.HasSuffix(name, ".ts"):
+		w.Header().Set("Content-Type", "video/mp2t")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	default:
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	}
-
-	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 }
 
 func (s *Server) getLiveSession(publicID string) *liveSession {

@@ -153,6 +153,12 @@ func TestHLSServingTracksViewerPresence(t *testing.T) {
 	if res.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", res.Code)
 	}
+	if got := res.Header().Get("Content-Type"); got != "application/vnd.apple.mpegurl" {
+		t.Fatalf("expected application/vnd.apple.mpegurl, got %s", got)
+	}
+	if got := res.Header().Get("Cache-Control"); got != "no-cache, no-store, must-revalidate, max-age=0" {
+		t.Fatalf("expected no-cache no-store, got %s", got)
+	}
 	snapshots := srv.tracker.Snapshots(time.Now())
 	if len(snapshots) != 1 {
 		t.Fatalf("expected one snapshot, got %d", len(snapshots))
@@ -162,6 +168,89 @@ func TestHLSServingTracksViewerPresence(t *testing.T) {
 	}
 	if snapshots[0].PlaylistRequests != 1 {
 		t.Fatalf("expected one playlist request, got %d", snapshots[0].PlaylistRequests)
+	}
+}
+
+func TestHLSPlaylistReturnsOKOnConditionalRequest(t *testing.T) {
+	root := t.TempDir()
+	streamDir := filepath.Join(root, "public-1")
+	if err := os.MkdirAll(streamDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(streamDir, "index.m3u8"), []byte("#EXTM3U\n#EXT-X-VERSION:7\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := New(config.Config{
+		HLSRoot:        root,
+		ViewerTTL:      45 * time.Second,
+		RollupInterval: time.Hour,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv.putLiveSession(&liveSession{publicID: "public-1", state: liveSessionReady})
+
+	req := httptest.NewRequest(http.MethodGet, "/live/public-1/index.m3u8", nil)
+	req.Header.Set("If-Modified-Since", time.Now().UTC().Format(http.TimeFormat))
+	res := httptest.NewRecorder()
+
+	srv.Routes().ServeHTTP(res, req)
+
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on live playlist conditional request, got %d", res.Code)
+	}
+	if res.Body.String() != "#EXTM3U\n#EXT-X-VERSION:7\n" {
+		t.Fatalf("unexpected playlist body: %s", res.Body.String())
+	}
+	if got := res.Header().Get("Content-Type"); got != "application/vnd.apple.mpegurl" {
+		t.Fatalf("expected application/vnd.apple.mpegurl, got %s", got)
+	}
+}
+
+func TestHLSSegmentAndInitHeaders(t *testing.T) {
+	root := t.TempDir()
+	streamDir := filepath.Join(root, "public-1")
+	if err := os.MkdirAll(streamDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(streamDir, "init.mp4"), []byte("mp4-data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(streamDir, "seg.m4s"), []byte("m4s-data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := New(config.Config{
+		HLSRoot:        root,
+		ViewerTTL:      45 * time.Second,
+		RollupInterval: time.Hour,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv.putLiveSession(&liveSession{publicID: "public-1", state: liveSessionReady})
+
+	// Test .mp4
+	req := httptest.NewRequest(http.MethodGet, "/live/public-1/init.mp4", nil)
+	res := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", res.Code)
+	}
+	if got := res.Header().Get("Content-Type"); got != "video/mp4" {
+		t.Fatalf("expected video/mp4, got %s", got)
+	}
+	if got := res.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+		t.Fatalf("expected immutable cache-control, got %s", got)
+	}
+
+	// Test .m4s
+	req = httptest.NewRequest(http.MethodGet, "/live/public-1/seg.m4s", nil)
+	res = httptest.NewRecorder()
+	srv.Routes().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", res.Code)
+	}
+	if got := res.Header().Get("Content-Type"); got != "video/iso.segment" {
+		t.Fatalf("expected video/iso.segment, got %s", got)
+	}
+	if got := res.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+		t.Fatalf("expected immutable cache-control, got %s", got)
 	}
 }
 
