@@ -156,7 +156,9 @@ ENV WORK_DIR=/tmp/transcoder \
     ANALYTICS_OUTBOX_ROOT=/var/lib/oxygen-live/analytics-outbox \
     ANALYTICS_ADDR=127.0.0.1:8090 \
     ANALYTICS_URL=http://127.0.0.1:8090 \
-    ANALYTICS_MIGRATIONS_PATH=/app/golang-analytics/migrations
+    ANALYTICS_MIGRATIONS_PATH=/app/golang-analytics/migrations \
+    XDG_CONFIG_HOME=/config \
+    XDG_DATA_HOME=/data
 
 RUN mkdir -p \
         storage/app/public \
@@ -169,11 +171,16 @@ RUN mkdir -p \
         /var/lib/oxygen-live/hls \
         /var/lib/oxygen-live/callbacks \
         /var/lib/oxygen-live/analytics-outbox \
+        /config/caddy \
+        /data/caddy \
     && rm -rf public/storage \
     && ln -s ../storage/app/public public/storage \
     && chown -R oxygen:oxygen \
         storage bootstrap/cache /tmp/transcoder /var/lib/oxygen-live \
-    && chmod -R ug+rwX storage bootstrap/cache /tmp/transcoder /var/lib/oxygen-live
+        /config/caddy /data/caddy \
+    && chmod -R ug+rwX \
+        storage bootstrap/cache /tmp/transcoder /var/lib/oxygen-live \
+        /config/caddy /data/caddy
 
 # Configure named Dokploy volumes for public organization images and the live
 # callback outbox. Transcode scratch is intentionally a separate sized volume

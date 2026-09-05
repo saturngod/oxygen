@@ -15,7 +15,9 @@ mkdir -p \
     "${WORK_DIR:-/tmp/transcoder}" \
     "${LIVE_HLS_ROOT:-/var/lib/oxygen-live/hls}" \
     "${LIVE_CALLBACK_ROOT:-/var/lib/oxygen-live/callbacks}" \
-    "${ANALYTICS_OUTBOX_ROOT:-/var/lib/oxygen-live/analytics-outbox}"
+    "${ANALYTICS_OUTBOX_ROOT:-/var/lib/oxygen-live/analytics-outbox}" \
+    "${XDG_CONFIG_HOME:-/config}/caddy" \
+    "${XDG_DATA_HOME:-/data}/caddy"
 
 rm -rf public/storage
 ln -s ../storage/app/public public/storage
@@ -26,7 +28,9 @@ chown -R oxygen:oxygen \
     "${WORK_DIR:-/tmp/transcoder}" \
     "${LIVE_HLS_ROOT:-/var/lib/oxygen-live/hls}" \
     "${LIVE_CALLBACK_ROOT:-/var/lib/oxygen-live/callbacks}" \
-    "${ANALYTICS_OUTBOX_ROOT:-/var/lib/oxygen-live/analytics-outbox}"
+    "${ANALYTICS_OUTBOX_ROOT:-/var/lib/oxygen-live/analytics-outbox}" \
+    "${XDG_CONFIG_HOME:-/config}/caddy" \
+    "${XDG_DATA_HOME:-/data}/caddy"
 
 # APP_KEY must be provided via Dokploy env. Do NOT auto-generate: there is no
 # persisted .env in the image, and a fresh key per boot would make every
