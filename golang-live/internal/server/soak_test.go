@@ -81,21 +81,17 @@ func runLiveStreamSoak(t *testing.T, adaptive bool) {
 		case "/internal/live/session-started":
 			select {
 			case authenticatedAt := <-authenticated:
-				if elapsed := time.Since(authenticatedAt); elapsed > 8*time.Second {
-					t.Errorf("HLS readiness took %s after authentication; target is 8s", elapsed)
+				if elapsed := time.Since(authenticatedAt); elapsed > 15*time.Second {
+					t.Errorf("HLS readiness took %s after authentication; target is 15s", elapsed)
 				}
 			default:
 				t.Error("session started without a recorded authentication time")
 			}
-			response, err := (&http.Client{Timeout: 3 * time.Second}).Get(playbackURL)
-			if err != nil {
-				t.Errorf("HLS was not reachable when the session became live: %v", err)
-			} else {
-				_ = response.Body.Close()
-				if response.StatusCode != http.StatusOK {
-					t.Errorf("HLS returned %d when the session became live", response.StatusCode)
-				}
+			expectedBackBuffer := 2
+			if adaptive {
+				expectedBackBuffer = adaptiveMinimumReadySegments
 			}
+			assertSessionBackBuffer(t, playbackURL, expectedBackBuffer)
 			select {
 			case started <- struct{}{}:
 			default:
@@ -172,7 +168,7 @@ func runLiveStreamSoak(t *testing.T, adaptive bool) {
 
 	select {
 	case <-started:
-	case <-time.After(15 * time.Second):
+	case <-time.After(30 * time.Second):
 		_ = publisher.Process.Kill()
 		t.Fatal("session did not start")
 	}
@@ -306,6 +302,81 @@ func mustParseURL(t *testing.T, value string) *url.URL {
 	}
 
 	return parsed
+}
+
+// assertSessionBackBuffer verifies the session only went live once the served
+// playlists carry enough completed segments for a joining player to start
+// behind the live edge instead of clamped onto it. It runs on the control
+// plane handler goroutine, so it reports through t.Errorf only.
+func assertSessionBackBuffer(t *testing.T, masterURL string, minimumSegments int) {
+	t.Helper()
+	client := &http.Client{Timeout: 3 * time.Second}
+	masterBase, err := url.Parse(masterURL)
+	if err != nil {
+		t.Errorf("parse playback URL %s: %v", masterURL, err)
+		return
+	}
+	masterBytes, err := fetchHLSSuccess(t, client, masterBase)
+	if err != nil {
+		t.Errorf("fetch master playlist: %v", err)
+		return
+	}
+	parsed, err := playlist.Unmarshal(masterBytes)
+	if err != nil {
+		t.Errorf("parse served master playlist: %v", err)
+		return
+	}
+	master, ok := parsed.(*playlist.Multivariant)
+	if !ok {
+		t.Errorf("served master is not a multivariant playlist")
+		return
+	}
+	for _, variant := range master.Variants {
+		mediaURL, err := masterBase.Parse(variant.URI)
+		if err != nil {
+			t.Errorf("parse variant reference %s: %v", variant.URI, err)
+			continue
+		}
+		mediaBytes, err := fetchHLSSuccess(t, client, mediaURL)
+		if err != nil {
+			t.Errorf("fetch media playlist %s: %v", variant.URI, err)
+			continue
+		}
+		parsedMedia, err := playlist.Unmarshal(mediaBytes)
+		if err != nil {
+			t.Errorf("parse served media playlist %s: %v", variant.URI, err)
+			continue
+		}
+		media, ok := parsedMedia.(*playlist.Media)
+		if !ok {
+			t.Errorf("served playlist %s is not a media playlist", variant.URI)
+			continue
+		}
+		if len(media.Segments) < minimumSegments {
+			t.Errorf("session went live with %d segments in %s; joining players need %d of back-buffer", len(media.Segments), variant.URI, minimumSegments)
+		}
+	}
+}
+
+func fetchHLSSuccess(t *testing.T, client *http.Client, target *url.URL) ([]byte, error) {
+	t.Helper()
+	response, err := client.Get(target.String())
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s returned %d", target, response.StatusCode)
+	}
+	contents, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, err
+	}
+	if len(contents) == 0 {
+		return nil, fmt.Errorf("%s returned an empty file", target)
+	}
+
+	return contents, nil
 }
 
 func validateHLSOverHTTP(t *testing.T, client *http.Client, masterURL string) {

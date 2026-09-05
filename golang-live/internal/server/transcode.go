@@ -301,6 +301,14 @@ func normalizedLiveSegmentDurationSeconds(segmentDurationSeconds int) int {
 	return segmentDurationSeconds
 }
 
+// adaptiveMinimumReadySegments gates when an adaptive session may go live.
+// The web player joins with liveSyncDurationCount = 2, i.e. two segments of
+// back-buffer behind the live edge. Going live with fewer segments forces it
+// to clamp its start position to the edge, where it stalls at every segment
+// boundary for the rest of the broadcast; one extra segment covers fragment
+// download time.
+const adaptiveMinimumReadySegments = 3
+
 func adaptiveHLSTimeout(configured time.Duration, segmentDurationSeconds int) time.Duration {
 	minimum := time.Duration(normalizedLiveSegmentDurationSeconds(segmentDurationSeconds)*3+10) * time.Second
 	if configured < minimum {

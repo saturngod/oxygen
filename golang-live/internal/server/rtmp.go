@@ -204,7 +204,7 @@ func (s *Server) handleRTMPConnInner(ctx context.Context, conn net.Conn) error {
 			return err
 		}
 		session.closeFn = adaptive.close
-		minimumReadySegments = 1
+		minimumReadySegments = adaptiveMinimumReadySegments
 	} else {
 		hlsTracks, trackMap, err := hlsTracksFromRTMP(reader.Tracks())
 		if err != nil {

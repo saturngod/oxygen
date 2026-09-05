@@ -75,7 +75,7 @@ B-frames:          0 if available
 
 For Harmonic Packager X, configure these GOP controls on the encoder feeding Packager X: progressive `1280x720` at `30000/1001`, a closed 60-frame GOP, and an IDR every GOP. Packager X forwards the RTMP publish, but Oxygen cannot force an IDR that the upstream source never sends. Confirm the actual IDR cadence on the RTMP input during commissioning.
 
-On publish, the service validates `{public_id}` and `{stream_key}` with Laravel, discovers tracks, and registers an internal starting session. During startup, HLS requests return `503` with `Retry-After: 1`. Laravel is told that the session is live only after the master and every advertised media playlist reference a nonempty initialization file and enough completed segments. Adaptive streams require one completed segment per rendition; source-quality remuxing requires two.
+On publish, the service validates `{public_id}` and `{stream_key}` with Laravel, discovers tracks, and registers an internal starting session. During startup, HLS requests return `503` with `Retry-After: 1`. Laravel is told that the session is live only after the master and every advertised media playlist reference a nonempty initialization file and enough completed segments. Adaptive streams require three completed segments per rendition — the web player joins two segments behind the live edge and one extra segment covers download jitter — so a stream becomes playable after roughly three segment durations; source-quality remuxing requires two.
 
 The live output is stored as fMP4 HLS under `LIVE_HLS_ROOT` for each stream public id. Profile-based streams contain `index.m3u8` plus one `vN/playlist.m3u8` rendition playlist and `.m4s` segments per selected quality.
 
