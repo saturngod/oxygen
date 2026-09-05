@@ -38,8 +38,11 @@ go run ./cmd/live
 | `MAX_TRACKED_VIEWERS` | `100000` | Per-stream cap for in-memory current and unique viewer identities |
 | `MAX_RTMP_CONNECTIONS` | `1000` | Maximum concurrent RTMP sockets, including handshakes |
 | `MAX_LIVE_TRANSCODERS` | `2` | Maximum concurrent adaptive ffmpeg processes |
+| `LIVE_HLS_STARTUP_TIMEOUT_SECONDS` | `30` | Total startup budget beginning with authenticated RTMP track discovery; delayed IDRs must arrive inside this window |
 | `FFMPEG_RELAY_WRITE_TIMEOUT_SECONDS` | `10` | Maximum time a media write to ffmpeg may block |
-| `FFMPEG_OUTPUT_STALL_TIMEOUT_SECONDS` | `10` | Maximum age of adaptive HLS output before the session fails (not playback latency) |
+| `FFMPEG_OUTPUT_STALL_TIMEOUT_SECONDS` | `10` | Maximum time any established adaptive rendition may stop advancing (not startup tolerance or playback latency) |
+| `LIVE_FFMPEG_ANALYZE_DURATION_US` | `1000000` | Adaptive ffmpeg input analysis budget in microseconds |
+| `LIVE_FFMPEG_PROBE_SIZE_BYTES` | `1048576` | Adaptive ffmpeg input probe budget in bytes |
 | `VIEWER_TTL_SECONDS` | `45` | Viewer activity window |
 | `ROLLUP_INTERVAL_SECONDS` | `15` | Snapshot flush interval |
 
@@ -70,9 +73,13 @@ Rate control:      CBR
 B-frames:          0 if available
 ```
 
-On publish, the service validates `{public_id}` and `{stream_key}` with Laravel, starts a live session, transcodes the profile's selected qualities into adaptive HLS, and exposes the master playlist through `GET /live/{public_id}/index.m3u8`.
+For Harmonic Packager X, configure these GOP controls on the encoder feeding Packager X: progressive `1280x720` at `30000/1001`, a closed 60-frame GOP, and an IDR every GOP. Packager X forwards the RTMP publish, but Oxygen cannot force an IDR that the upstream source never sends. Confirm the actual IDR cadence on the RTMP input during commissioning.
+
+On publish, the service validates `{public_id}` and `{stream_key}` with Laravel, discovers tracks, and registers an internal starting session. During startup, HLS requests return `503` with `Retry-After: 1`. Laravel is told that the session is live only after the master and every advertised media playlist reference a nonempty initialization file and enough completed segments. Adaptive streams require one completed segment per rendition; source-quality remuxing requires two.
 
 The live output is stored as fMP4 HLS under `LIVE_HLS_ROOT` for each stream public id. Profile-based streams contain `index.m3u8` plus one `vN/playlist.m3u8` rendition playlist and `.m4s` segments per selected quality.
+
+Startup tolerance, runtime stall detection, and player latency are separate settings. Increasing `LIVE_HLS_STARTUP_TIMEOUT_SECONDS` permits a late first IDR but does not make segments appear sooner. `FFMPEG_OUTPUT_STALL_TIMEOUT_SECONDS` is evaluated only after adaptive output is ready and is checked independently for every rendition.
 
 ## Soak verification
 

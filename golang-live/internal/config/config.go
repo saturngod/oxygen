@@ -9,28 +9,31 @@ import (
 )
 
 type Config struct {
-	Addr                 string
-	RTMPAddr             string
-	HLSRoot              string
-	FFmpegBin            string
-	FFmpegVideoCodec     string
-	CallbackRoot         string
-	AnalyticsURL         string
-	AnalyticsToken       string
-	AnalyticsOutboxRoot  string
-	AnalyticsBatchSize   int
-	LaravelURL           string
-	ServiceToken         string
-	ControlToken         string
-	AllowInsecureControl bool
-	TrustProxyHeaders    bool
-	ViewerTTL            time.Duration
-	RollupInterval       time.Duration
-	MaxTrackedViewers    int
-	MaxRTMPConnections   int
-	MaxLiveTranscoders   int
-	FFmpegWriteTimeout   time.Duration
-	FFmpegStallTimeout   time.Duration
+	Addr                  string
+	RTMPAddr              string
+	HLSRoot               string
+	FFmpegBin             string
+	FFmpegVideoCodec      string
+	CallbackRoot          string
+	AnalyticsURL          string
+	AnalyticsToken        string
+	AnalyticsOutboxRoot   string
+	AnalyticsBatchSize    int
+	LaravelURL            string
+	ServiceToken          string
+	ControlToken          string
+	AllowInsecureControl  bool
+	TrustProxyHeaders     bool
+	ViewerTTL             time.Duration
+	RollupInterval        time.Duration
+	MaxTrackedViewers     int
+	MaxRTMPConnections    int
+	MaxLiveTranscoders    int
+	HLSStartupTimeout     time.Duration
+	FFmpegWriteTimeout    time.Duration
+	FFmpegStallTimeout    time.Duration
+	FFmpegAnalyzeDuration int
+	FFmpegProbeSize       int
 }
 
 func Load() Config {
@@ -38,28 +41,31 @@ func Load() Config {
 	loadDotEnv("../.env")
 
 	return Config{
-		Addr:                 getenv("LIVE_ADDR", ":8081"),
-		RTMPAddr:             getenv("LIVE_RTMP_ADDR", ":1935"),
-		HLSRoot:              getenv("LIVE_HLS_ROOT", "/tmp/oxygen-live/hls"),
-		FFmpegBin:            getenv("FFMPEG_BIN", "ffmpeg"),
-		FFmpegVideoCodec:     getenv("FFMPEG_VIDEO_CODEC", "libx264"),
-		CallbackRoot:         getenv("LIVE_CALLBACK_ROOT", "/tmp/oxygen-live/callbacks"),
-		AnalyticsURL:         strings.TrimRight(getenv("ANALYTICS_URL", ""), "/"),
-		AnalyticsToken:       getenv("ANALYTICS_INGEST_TOKEN", ""),
-		AnalyticsOutboxRoot:  getenv("ANALYTICS_OUTBOX_ROOT", "/tmp/oxygen-live/analytics-outbox"),
-		AnalyticsBatchSize:   intEnv("ANALYTICS_BATCH_SIZE", 100),
-		LaravelURL:           strings.TrimRight(getenv("LARAVEL_URL", "http://127.0.0.1:8000"), "/"),
-		ServiceToken:         getenv("LIVE_SERVICE_TOKEN", ""),
-		ControlToken:         getenv("LIVE_CONTROL_TOKEN", ""),
-		AllowInsecureControl: boolEnv("LIVE_ALLOW_INSECURE_CONTROL", false),
-		TrustProxyHeaders:    boolEnv("LIVE_TRUST_PROXY_HEADERS", false),
-		ViewerTTL:            secondsEnv("VIEWER_TTL_SECONDS", 45),
-		RollupInterval:       secondsEnv("ROLLUP_INTERVAL_SECONDS", 15),
-		MaxTrackedViewers:    intEnv("MAX_TRACKED_VIEWERS", 100000),
-		MaxRTMPConnections:   intEnv("MAX_RTMP_CONNECTIONS", 1000),
-		MaxLiveTranscoders:   intEnv("MAX_LIVE_TRANSCODERS", 2),
-		FFmpegWriteTimeout:   secondsEnv("FFMPEG_RELAY_WRITE_TIMEOUT_SECONDS", 10),
-		FFmpegStallTimeout:   secondsEnv("FFMPEG_OUTPUT_STALL_TIMEOUT_SECONDS", 10),
+		Addr:                  getenv("LIVE_ADDR", ":8081"),
+		RTMPAddr:              getenv("LIVE_RTMP_ADDR", ":1935"),
+		HLSRoot:               getenv("LIVE_HLS_ROOT", "/tmp/oxygen-live/hls"),
+		FFmpegBin:             getenv("FFMPEG_BIN", "ffmpeg"),
+		FFmpegVideoCodec:      getenv("FFMPEG_VIDEO_CODEC", "libx264"),
+		CallbackRoot:          getenv("LIVE_CALLBACK_ROOT", "/tmp/oxygen-live/callbacks"),
+		AnalyticsURL:          strings.TrimRight(getenv("ANALYTICS_URL", ""), "/"),
+		AnalyticsToken:        getenv("ANALYTICS_INGEST_TOKEN", ""),
+		AnalyticsOutboxRoot:   getenv("ANALYTICS_OUTBOX_ROOT", "/tmp/oxygen-live/analytics-outbox"),
+		AnalyticsBatchSize:    intEnv("ANALYTICS_BATCH_SIZE", 100),
+		LaravelURL:            strings.TrimRight(getenv("LARAVEL_URL", "http://127.0.0.1:8000"), "/"),
+		ServiceToken:          getenv("LIVE_SERVICE_TOKEN", ""),
+		ControlToken:          getenv("LIVE_CONTROL_TOKEN", ""),
+		AllowInsecureControl:  boolEnv("LIVE_ALLOW_INSECURE_CONTROL", false),
+		TrustProxyHeaders:     boolEnv("LIVE_TRUST_PROXY_HEADERS", false),
+		ViewerTTL:             secondsEnv("VIEWER_TTL_SECONDS", 45),
+		RollupInterval:        secondsEnv("ROLLUP_INTERVAL_SECONDS", 15),
+		MaxTrackedViewers:     intEnv("MAX_TRACKED_VIEWERS", 100000),
+		MaxRTMPConnections:    intEnv("MAX_RTMP_CONNECTIONS", 1000),
+		MaxLiveTranscoders:    intEnv("MAX_LIVE_TRANSCODERS", 2),
+		HLSStartupTimeout:     secondsEnv("LIVE_HLS_STARTUP_TIMEOUT_SECONDS", 30),
+		FFmpegWriteTimeout:    secondsEnv("FFMPEG_RELAY_WRITE_TIMEOUT_SECONDS", 10),
+		FFmpegStallTimeout:    secondsEnv("FFMPEG_OUTPUT_STALL_TIMEOUT_SECONDS", 10),
+		FFmpegAnalyzeDuration: intEnv("LIVE_FFMPEG_ANALYZE_DURATION_US", 1000000),
+		FFmpegProbeSize:       intEnv("LIVE_FFMPEG_PROBE_SIZE_BYTES", 1048576),
 	}
 }
 

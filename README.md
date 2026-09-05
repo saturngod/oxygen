@@ -669,6 +669,8 @@ The Go live service owns:
 
 Live output is written as fMP4 HLS, not `.ts` files. Under `LIVE_HLS_ROOT`, each stream gets its own directory containing playlists like `index.m3u8` and media files like `*_init.mp4`, `*_segNN.mp4`, and `*_partNNN.mp4`.
 
+The live service returns a retryable, non-cacheable `503` while a known stream is still building its initial HLS window. It marks the session live only after every advertised rendition has a valid initialization file and completed referenced segments. Configure `LIVE_HLS_STARTUP_TIMEOUT_SECONDS` separately from the established-output watchdog `FFMPEG_OUTPUT_STALL_TIMEOUT_SECONDS`.
+
 ### Laravel Live Configuration
 
 Set these values in the Laravel `.env` file:

@@ -35,38 +35,118 @@ import {
     viewer as viewOrgLiveStreamAnalytics,
 } from '@/routes/admin/organizations/live-streams';
 
-type HlsErrorData = {
+type AdminHlsErrorData = {
     details?: string;
     fatal?: boolean;
+    type?: string;
 };
 
-type HlsInstance = {
+type AdminHlsInstance = {
     attachMedia: (media: HTMLMediaElement) => void;
     destroy: () => void;
     loadSource: (src: string) => void;
+    recoverMediaError: () => void;
+    startLoad: () => void;
     on: (
         event: string,
-        callback: (event: string, data: HlsErrorData) => void,
+        callback: (event: string, data: AdminHlsErrorData) => void,
     ) => void;
 };
 
-type HlsConstructor = {
+type AdminHlsConstructor = {
     Events: {
         ERROR: string;
         MANIFEST_PARSED: string;
     };
+    ErrorTypes: {
+        MEDIA_ERROR: string;
+        NETWORK_ERROR: string;
+    };
     isSupported: () => boolean;
-    new (config?: Record<string, unknown>): HlsInstance;
+    new (config?: Record<string, unknown>): AdminHlsInstance;
 };
 
-declare global {
-    interface Window {
-        Hls?: HlsConstructor;
-    }
+function getHlsConstructor(): AdminHlsConstructor | undefined {
+    return (window as Window & { Hls?: AdminHlsConstructor }).Hls;
 }
 
 const HLS_SCRIPT_SRC =
     'https://cdn.jsdelivr.net/npm/hls.js@1.6.16/dist/hls.min.js';
+const PLAYER_RETRY_LIMIT_MS = 30_000;
+const PLAYER_RETRY_DELAYS_MS = [1_000, 2_000, 4_000] as const;
+let hlsScriptPromise: Promise<void> | null = null;
+
+function loadHlsScript(): Promise<void> {
+    if (getHlsConstructor()) {
+        return Promise.resolve();
+    }
+
+    if (hlsScriptPromise) {
+        return hlsScriptPromise;
+    }
+
+    hlsScriptPromise = new Promise<void>((resolve, reject) => {
+        let script = document.querySelector<HTMLScriptElement>(
+            `script[src="${HLS_SCRIPT_SRC}"]`,
+        );
+
+        if (script && script.dataset.oxygenHlsLoading !== 'true') {
+            script.remove();
+            script = null;
+        }
+
+        const shouldAppend = !script;
+
+        if (shouldAppend) {
+            script = document.createElement('script');
+            script.src = HLS_SCRIPT_SRC;
+            script.async = true;
+            script.dataset.oxygenHlsLoading = 'true';
+        }
+
+        if (!script) {
+            reject(new Error('Could not create the HLS player script'));
+
+            return;
+        }
+
+        const target = script;
+        const timeout = window.setTimeout(() => {
+            target.removeEventListener('load', loaded);
+            target.removeEventListener('error', failed);
+            reject(new Error('Timed out loading the HLS player'));
+        }, 10_000);
+        const loaded = () => {
+            window.clearTimeout(timeout);
+            target.dataset.oxygenHlsLoading = 'false';
+
+            if (getHlsConstructor()) {
+                resolve();
+
+                return;
+            }
+
+            reject(new Error('The HLS player script did not initialize'));
+        };
+        const failed = () => {
+            window.clearTimeout(timeout);
+            target.dataset.oxygenHlsLoading = 'false';
+            reject(new Error('Could not load the HLS player'));
+        };
+        target.addEventListener('load', loaded, { once: true });
+        target.addEventListener('error', failed, { once: true });
+
+        if (shouldAppend) {
+            document.head.appendChild(target);
+        }
+    }).catch((error: unknown) => {
+        hlsScriptPromise = null;
+
+        throw error;
+    });
+
+    return hlsScriptPromise;
+}
 
 type LiveStreamStatus =
     | 'idle'
@@ -174,112 +254,184 @@ function CopyField({
     );
 }
 
-function LivePlayer({ src, isLive }: { src: string; isLive: boolean }) {
+function LivePlayer({
+    src,
+    isLive,
+    sessionId,
+}: {
+    src: string;
+    isLive: boolean;
+    sessionId: string | null;
+}) {
     const videoRef = useRef<HTMLVideoElement | null>(null);
+    const [playbackError, setPlaybackError] = useState<{
+        sessionId: string | null;
+        message: string;
+    } | null>(null);
 
     useEffect(() => {
         const video = videoRef.current;
         let cancelled = false;
-        let hls: HlsInstance | null = null;
+        let hls: AdminHlsInstance | null = null;
+        let mediaRecoveryUsed = false;
+        let retryIndex = 0;
+        let retryStartedAt = Date.now();
+        const timers = new Set<number>();
 
         if (!video || !src) {
             return;
         }
 
-        const seekToLiveEdge = (force = false) => {
-            if (video.seekable.length === 0) {
+        const clearMedia = () => {
+            video.pause();
+            video.removeAttribute('src');
+            video.load();
+        };
+
+        if (!isLive) {
+            clearMedia();
+
+            return;
+        }
+
+        const showFailure = (message: string) => {
+            if (!cancelled) {
+                setPlaybackError({ sessionId, message });
+            }
+        };
+        const scheduleRetry = (retry: () => void, details?: string) => {
+            if (timers.size > 0) {
                 return;
             }
 
-            const edge = video.seekable.end(video.seekable.length - 1);
-            const target = Math.max(0, edge - 3);
-            const latency = edge - video.currentTime;
+            const delay =
+                PLAYER_RETRY_DELAYS_MS[
+                    Math.min(retryIndex, PLAYER_RETRY_DELAYS_MS.length - 1)
+                ];
+            retryIndex += 1;
 
-            if (force || latency > 12) {
-                video.currentTime = target;
+            if (Date.now() - retryStartedAt + delay > PLAYER_RETRY_LIMIT_MS) {
+                showFailure(
+                    `Playback could not reconnect within 30 seconds${details ? ` (${details})` : ''}. Check the publisher and HLS proxy, then retry.`,
+                );
+
+                return;
             }
+
+            const timer = window.setTimeout(() => {
+                timers.delete(timer);
+
+                if (!cancelled) {
+                    retry();
+                }
+            }, delay);
+            timers.add(timer);
         };
-
-        const handleLoadedMetadata = () => seekToLiveEdge(true);
-        const handleCanPlay = () => seekToLiveEdge(true);
-        const handleTimeUpdate = () => seekToLiveEdge(false);
-
-        video.addEventListener('loadedmetadata', handleLoadedMetadata);
-        video.addEventListener('canplay', handleCanPlay, { once: true });
-        video.addEventListener('play', handleCanPlay);
-        video.addEventListener('timeupdate', handleTimeUpdate);
+        const handlePlayable = () => {
+            retryIndex = 0;
+            retryStartedAt = Date.now();
+            setPlaybackError((current) =>
+                current?.sessionId === sessionId ? null : current,
+            );
+        };
+        video.addEventListener('canplay', handlePlayable);
 
         if (video.canPlayType('application/vnd.apple.mpegurl')) {
-            video.src = src;
+            const loadNative = () => {
+                clearMedia();
+                video.src = src;
+                video.load();
+            };
+            const handleNativeError = () => {
+                scheduleRetry(loadNative, 'native HLS network error');
+            };
+            video.addEventListener('error', handleNativeError);
+            loadNative();
 
             return () => {
-                video.removeEventListener(
-                    'loadedmetadata',
-                    handleLoadedMetadata,
-                );
-                video.removeEventListener('canplay', handleCanPlay);
-                video.removeEventListener('play', handleCanPlay);
-                video.removeEventListener('timeupdate', handleTimeUpdate);
+                cancelled = true;
+                timers.forEach((timer) => window.clearTimeout(timer));
+                video.removeEventListener('canplay', handlePlayable);
+                video.removeEventListener('error', handleNativeError);
+                clearMedia();
             };
         }
 
         const loadHls = async () => {
-            if (!window.Hls) {
-                await new Promise<void>((resolve, reject) => {
-                    const existing = document.querySelector(
-                        `script[src="${HLS_SCRIPT_SRC}"]`,
-                    );
+            await loadHlsScript();
 
-                    if (existing) {
-                        existing.addEventListener('load', () => resolve(), {
-                            once: true,
-                        });
-                        existing.addEventListener('error', () => reject(), {
-                            once: true,
-                        });
+            const Hls = getHlsConstructor();
 
-                        return;
-                    }
-
-                    const script = document.createElement('script');
-                    script.src = HLS_SCRIPT_SRC;
-                    script.async = true;
-                    script.onload = () => resolve();
-                    script.onerror = () => reject();
-                    document.head.appendChild(script);
-                });
-            }
-
-            if (cancelled || !window.Hls?.isSupported()) {
+            if (cancelled) {
                 return;
             }
 
-            hls = new window.Hls({
-                lowLatencyMode: true,
-                liveSyncDuration: 3,
-                liveMaxLatencyDuration: 10,
+            if (!Hls?.isSupported()) {
+                showFailure('This browser does not support HLS playback.');
+
+                return;
+            }
+
+            const instance = new Hls({
+                lowLatencyMode: false,
+                liveSyncDurationCount: 3,
+                liveMaxLatencyDurationCount: 6,
                 liveDurationInfinity: true,
                 maxLiveSyncPlaybackRate: 1.5,
             });
 
-            hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
-                seekToLiveEdge(true);
+            hls = instance;
+            instance.on(Hls.Events.MANIFEST_PARSED, () => {
+                handlePlayable();
             });
-            hls.loadSource(src);
-            hls.attachMedia(video);
+            instance.on(Hls.Events.ERROR, (_event, data) => {
+                if (!data.fatal || !hls) {
+                    return;
+                }
+
+                if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+                    scheduleRetry(() => {
+                        hls?.loadSource(src);
+                        hls?.startLoad();
+                    }, data.details);
+
+                    return;
+                }
+
+                if (
+                    data.type === Hls.ErrorTypes.MEDIA_ERROR &&
+                    !mediaRecoveryUsed
+                ) {
+                    mediaRecoveryUsed = true;
+                    instance.recoverMediaError();
+
+                    return;
+                }
+
+                showFailure(
+                    `Playback stopped${data.details ? ` (${data.details})` : ''}. Check the incoming stream codec and HLS output.`,
+                );
+            });
+            instance.attachMedia(video);
+            instance.loadSource(src);
         };
 
-        void loadHls().catch(() => undefined);
+        void loadHls().catch((error: unknown) => {
+            showFailure(
+                error instanceof Error
+                    ? error.message
+                    : 'Could not initialize HLS playback',
+            );
+        });
 
         return () => {
             cancelled = true;
-            video.removeEventListener('loadedmetadata', handleLoadedMetadata);
-            video.removeEventListener('canplay', handleCanPlay);
-            video.removeEventListener('play', handleCanPlay);
-            video.removeEventListener('timeupdate', handleTimeUpdate);
+            timers.forEach((timer) => window.clearTimeout(timer));
+            video.removeEventListener('canplay', handlePlayable);
             hls?.destroy();
+            clearMedia();
         };
-    }, [src]);
+    }, [src, isLive, sessionId]);
 
     return (
         <div className="relative aspect-video overflow-hidden rounded-lg border bg-black">
@@ -292,6 +444,11 @@ function LivePlayer({ src, isLive }: { src: string; isLive: boolean }) {
             {!isLive && (
                 <div className="absolute inset-0 flex items-center justify-center bg-black/70 text-sm text-white">
                     Stream is not live
+                </div>
+            )}
+            {isLive && playbackError?.sessionId === sessionId && (
+                <div className="absolute inset-x-3 bottom-3 rounded-md border border-red-400/40 bg-red-950/90 p-3 text-sm text-red-50 shadow-lg">
+                    {playbackError.message}
                 </div>
             )}
         </div>
@@ -419,6 +576,7 @@ export default function ShowLiveStream({ organization, liveStream }: Props) {
                         <LivePlayer
                             src={liveStream.hls_url}
                             isLive={liveStream.status === 'live'}
+                            sessionId={liveStream.current_session?.id ?? null}
                         />
 
                         <div className="grid gap-3 sm:grid-cols-3">

@@ -6,7 +6,7 @@ import (
 )
 
 func TestLoadDefaultStallTimeout(t *testing.T) {
-	for _, value := range []string{"", "invalid", "0", "-1", "10"} {
+	for _, value := range []string{"", "invalid", "0", "-1"} {
 		t.Run(value, func(t *testing.T) {
 			t.Setenv("FFMPEG_OUTPUT_STALL_TIMEOUT_SECONDS", value)
 			if got := Load().FFmpegStallTimeout; got != 10*time.Second {
@@ -24,6 +24,9 @@ func TestLoadProductionSafetySettings(t *testing.T) {
 	t.Setenv("MAX_LIVE_TRANSCODERS", "4")
 	t.Setenv("FFMPEG_RELAY_WRITE_TIMEOUT_SECONDS", "12")
 	t.Setenv("FFMPEG_OUTPUT_STALL_TIMEOUT_SECONDS", "40")
+	t.Setenv("LIVE_HLS_STARTUP_TIMEOUT_SECONDS", "45")
+	t.Setenv("LIVE_FFMPEG_ANALYZE_DURATION_US", "1500000")
+	t.Setenv("LIVE_FFMPEG_PROBE_SIZE_BYTES", "2097152")
 	t.Setenv("VIEWER_TTL_SECONDS", "60")
 
 	cfg := Load()
@@ -48,6 +51,12 @@ func TestLoadProductionSafetySettings(t *testing.T) {
 	}
 	if cfg.FFmpegStallTimeout != 40*time.Second {
 		t.Fatalf("expected 40 second ffmpeg stall timeout, got %s", cfg.FFmpegStallTimeout)
+	}
+	if cfg.HLSStartupTimeout != 45*time.Second {
+		t.Fatalf("expected 45 second HLS startup timeout, got %s", cfg.HLSStartupTimeout)
+	}
+	if cfg.FFmpegAnalyzeDuration != 1500000 || cfg.FFmpegProbeSize != 2097152 {
+		t.Fatalf("unexpected ffmpeg probe limits: %d/%d", cfg.FFmpegAnalyzeDuration, cfg.FFmpegProbeSize)
 	}
 	if cfg.ViewerTTL != time.Minute {
 		t.Fatalf("expected one minute viewer ttl, got %s", cfg.ViewerTTL)

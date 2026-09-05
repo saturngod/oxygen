@@ -27,6 +27,8 @@ func TestBuildLiveFFmpegArgsCreatesAdaptiveMasterPlaylist(t *testing.T) {
 		true,
 		"libx264",
 		"run-a1b2",
+		1000000,
+		1048576,
 	)
 	joined := strings.Join(args, " ")
 
@@ -37,6 +39,9 @@ func TestBuildLiveFFmpegArgsCreatesAdaptiveMasterPlaylist(t *testing.T) {
 	assertContains(t, joined, "-master_pl_name index.m3u8")
 	assertContains(t, joined, "-hls_fmp4_init_filename run-a1b2_init_%v.mp4")
 	assertContains(t, joined, "run-a1b2_segment_%09d.m4s")
+	assertContains(t, joined, "-rtmp_live live -rtmp_buffer 0 -analyzeduration 1000000 -probesize 1048576 -i")
+	assertContains(t, joined, "-g:v:0 60")
+	assertContains(t, joined, "-bf:v:0 0")
 	assertContains(t, joined, filepath.Join(outputDir, "v%v", "playlist.m3u8"))
 }
 
@@ -46,7 +51,6 @@ func TestAdaptiveHLSWatchdogReportsMissingOutput(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	output := &adaptiveHLS{
-		failure:   make(chan error, 1),
 		publisher: publisher,
 	}
 
@@ -55,7 +59,7 @@ func TestAdaptiveHLSWatchdogReportsMissingOutput(t *testing.T) {
 	deadline := time.After(time.Second)
 	for {
 		if err := output.currentFailure(); err != nil {
-			if !strings.Contains(err.Error(), "stalled") {
+			if !strings.Contains(err.Error(), "adaptive HLS") {
 				t.Fatalf("unexpected watchdog failure: %v", err)
 			}
 			break
@@ -68,20 +72,178 @@ func TestAdaptiveHLSWatchdogReportsMissingOutput(t *testing.T) {
 	}
 }
 
-func TestLatestAdaptiveSegmentFindsNewestVariantMedia(t *testing.T) {
+func TestHLSOutputReadyRequiresMasterAndEnoughSegmentsInOneRendition(t *testing.T) {
 	root := t.TempDir()
 	variant := filepath.Join(root, "v0")
 	if err := os.MkdirAll(variant, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	segment := filepath.Join(variant, "run_segment_000000001.m4s")
-	if err := os.WriteFile(segment, []byte("segment"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "index.m3u8"), []byte("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\nv0/playlist.m3u8\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(variant, "playlist.m3u8"), []byte("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:2.0,\nrun_segment_000000000.m4s\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(variant, "init.mp4"), []byte("init"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(variant, "run_segment_000000000.m4s"), []byte("segment"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	latest, found := latestAdaptiveSegment(root)
-	if !found || latest.IsZero() {
-		t.Fatal("expected adaptive segment to be found")
+	if hlsOutputReady(root, 2) {
+		t.Fatal("output became ready before the rendition had enough segments")
+	}
+
+	if err := os.WriteFile(filepath.Join(variant, "run_segment_000000001.m4s"), []byte("segment"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(variant, "playlist.m3u8"), []byte("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:2.0,\nrun_segment_000000000.m4s\n#EXTINF:2.0,\nrun_segment_000000001.m4s\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !hlsOutputReady(root, 2) {
+		t.Fatal("expected output with a master playlist and two segments to be ready")
+	}
+}
+
+func TestHLSOutputReadyRecognizesDirectFMP4Segments(t *testing.T) {
+	root := t.TempDir()
+	for name, contents := range map[string]string{
+		"index.m3u8":       "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\nstream.m3u8\n",
+		"stream.m3u8":      "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-MAP:URI=\"stream_init.mp4\"\n#EXTINF:2.0,\nstream_seg0.mp4\n",
+		"stream_init.mp4":  "init",
+		"stream_seg0.mp4":  "segment",
+		"stream_part0.mp4": "part",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if !hlsOutputReady(root, 1) {
+		t.Fatal("expected a direct fMP4 segment to make output ready")
+	}
+	if hlsOutputReady(root, 2) {
+		t.Fatal("initialization and partial files must not count as complete segments")
+	}
+	if err := os.Remove(filepath.Join(root, "stream_init.mp4")); err != nil {
+		t.Fatal(err)
+	}
+	if hlsOutputReady(root, 1) {
+		t.Fatal("output became ready without its referenced initialization file")
+	}
+}
+
+func TestHLSOutputReadyRequiresEveryAdvertisedVariantAndAudioRendition(t *testing.T) {
+	root := t.TempDir()
+	master := "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"main\",URI=\"audio.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=1000,CODECS=\"avc1.42e01e,mp4a.40.2\",AUDIO=\"audio\"\nvideo.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=500,CODECS=\"avc1.42e01e\"\nmissing.m3u8\n"
+	if err := os.WriteFile(filepath.Join(root, "index.m3u8"), []byte(master), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeTestMediaPlaylist(t, root, "video", 2)
+	writeTestMediaPlaylist(t, root, "audio", 2)
+	if hlsOutputReady(root, 2) {
+		t.Fatal("output became ready while an advertised variant was missing")
+	}
+	writeTestMediaPlaylist(t, root, "missing", 2)
+	if !hlsOutputReady(root, 2) {
+		t.Fatal("expected all advertised playlists to be ready")
+	}
+}
+
+func TestHLSOutputReadyCountsSharedDirectoryPlaylistsIndependently(t *testing.T) {
+	root := t.TempDir()
+	master := "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"main\",URI=\"audio.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=1000,CODECS=\"avc1.42e01e,mp4a.40.2\",AUDIO=\"audio\"\nvideo.m3u8\n"
+	if err := os.WriteFile(filepath.Join(root, "index.m3u8"), []byte(master), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeTestMediaPlaylist(t, root, "video", 2)
+	writeTestMediaPlaylist(t, root, "audio", 1)
+	if hlsOutputReady(root, 2) {
+		t.Fatal("video segments must not satisfy audio rendition readiness")
+	}
+	writeTestMediaPlaylist(t, root, "audio", 2)
+	if !hlsOutputReady(root, 2) {
+		t.Fatal("expected both shared-directory playlists to be ready")
+	}
+}
+
+func writeTestMediaPlaylist(t *testing.T, root string, name string, segmentCount int) {
+	t.Helper()
+	initName := name + "_init.mp4"
+	if err := os.WriteFile(filepath.Join(root, initName), []byte("init"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var body strings.Builder
+	body.WriteString("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-MAP:URI=\"")
+	body.WriteString(initName)
+	body.WriteString("\"\n")
+	for index := range segmentCount {
+		segmentName := fmt.Sprintf("%s_segment_%d.m4s", name, index)
+		if err := os.WriteFile(filepath.Join(root, segmentName), []byte("segment"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(&body, "#EXTINF:2.0,\n%s\n", segmentName)
+	}
+	if err := os.WriteFile(filepath.Join(root, name+".m3u8"), []byte(body.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWaitForHLSReadyReturnsRTMPReadFailure(t *testing.T) {
+	readDone := make(chan struct{})
+	close(readDone)
+
+	_, err := waitForHLSReady(context.Background(), t.TempDir(), 1, readDone, func() error {
+		return fmt.Errorf("publisher disconnected")
+	}, func() error { return nil })
+	if err == nil || !strings.Contains(err.Error(), "publisher disconnected") {
+		t.Fatalf("expected publisher disconnect error, got %v", err)
+	}
+}
+
+func TestWaitForHLSReadyHonorsStartupContext(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	defer cancel()
+	readDone := make(chan struct{})
+
+	_, err := waitForHLSReady(ctx, t.TempDir(), 1, readDone, func() error { return nil }, func() error { return nil })
+	if err == nil || !strings.Contains(err.Error(), "deadline exceeded") {
+		t.Fatalf("expected bounded startup timeout, got %v", err)
+	}
+}
+
+func TestAdaptiveHLSWatchdogDetectsOneStalledRendition(t *testing.T) {
+	root := t.TempDir()
+	master := "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000,CODECS=\"avc1.42e01e\"\nv0.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=500,CODECS=\"avc1.42e01e\"\nv1.m3u8\n"
+	if err := os.WriteFile(filepath.Join(root, "index.m3u8"), []byte(master), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeTestMediaPlaylist(t, root, "v0", 1)
+	writeTestMediaPlaylist(t, root, "v1", 1)
+	publisher, peer := net.Pipe()
+	defer peer.Close()
+	output := &adaptiveHLS{publisher: publisher}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go watchAdaptiveHLS(ctx, output, root, 250*time.Millisecond)
+
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case <-ticker.C:
+			writeTestMediaPlaylist(t, root, "v0", 1)
+			if failure := output.currentFailure(); failure != nil {
+				if !strings.Contains(failure.Error(), "v1.m3u8") {
+					t.Fatalf("wrong rendition failed: %v", failure)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("watchdog did not detect the stalled rendition")
+		}
 	}
 }
 
@@ -94,6 +256,8 @@ func TestBuildLiveFFmpegArgsSupportsVideoOnlySingleRendition(t *testing.T) {
 		false,
 		"h264_videotoolbox",
 		"run-c3d4",
+		1000000,
+		1048576,
 	), " ")
 
 	assertContains(t, joined, "[0:v]scale=w=352:h=240[vout0]")
@@ -113,6 +277,8 @@ func TestBuildLiveFFmpegArgsUsesDifferentMediaURLsAcrossSessions(t *testing.T) {
 		true,
 		"libx264",
 		"session-one",
+		1000000,
+		1048576,
 	), " ")
 	second := strings.Join(buildLiveFFmpegArgs(
 		"rtmp://127.0.0.1:1234/live/source",
@@ -121,6 +287,8 @@ func TestBuildLiveFFmpegArgsUsesDifferentMediaURLsAcrossSessions(t *testing.T) {
 		true,
 		"libx264",
 		"session-two",
+		1000000,
+		1048576,
 	), " ")
 
 	assertContains(t, first, "session-one_init.mp4")
@@ -147,7 +315,7 @@ func TestLiveFFmpegWritesVariantInitializationFiles(t *testing.T) {
 	}
 	render240p, _ := quality.Get("240p")
 	render360p, _ := quality.Get("360p")
-	args := buildLiveFFmpegArgs(input, root, []quality.Rendition{render240p, render360p}, true, "libx264", "integration")
+	args := buildLiveFFmpegArgs(input, root, []quality.Rendition{render240p, render360p}, true, "libx264", "integration", 1000000, 1048576)
 	if output, err := exec.CommandContext(ctx, ffmpeg, args...).CombinedOutput(); err != nil {
 		t.Fatalf("transcode adaptive HLS: %v\n%s", err, output)
 	}

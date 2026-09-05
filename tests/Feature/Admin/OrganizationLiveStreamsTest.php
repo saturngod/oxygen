@@ -11,6 +11,7 @@ use App\Models\Organization;
 use App\Models\Profile;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 
@@ -422,7 +423,7 @@ test('disabling a live stream kicks the active publisher', function () {
     Http::assertSentCount(1);
 });
 
-test('disabling an idle live stream does not call the control service', function () {
+test('disabling an idle live stream disconnects a publisher that may still be starting', function () {
     [$user, $organization] = liveStreamAdmin();
     $liveStream = LiveStream::factory()
         ->for($organization)
@@ -433,7 +434,9 @@ test('disabling an idle live stream does not call the control service', function
         'services.live.control_token' => 'control-secret',
     ]);
 
-    Http::fake();
+    Http::fake([
+        'http://live-service.test/streams/'.$liveStream->public_id.'/restart' => Http::response(['ok' => true]),
+    ]);
 
     $this->actingAs($user)
         ->post(route('admin.organizations.live-streams.disable', [$organization, $liveStream]))
@@ -441,7 +444,40 @@ test('disabling an idle live stream does not call the control service', function
 
     expect($liveStream->refresh()->status)->toBe(LiveStreamStatus::Disabled);
 
-    Http::assertNothingSent();
+    Http::assertSentCount(1);
+    Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
+        && $request->url() === 'http://live-service.test/streams/'.$liveStream->public_id.'/restart'
+        && $request->hasHeader('Authorization', 'Bearer control-secret'));
+});
+
+test('restarting an idle live stream disconnects a publisher that may still be starting', function () {
+    [$user, $organization] = liveStreamAdmin();
+    $liveStream = LiveStream::factory()
+        ->for($organization)
+        ->create([
+            'status' => LiveStreamStatus::Idle,
+            'restart_required' => true,
+        ]);
+
+    config([
+        'services.live.control_url' => 'http://live-service.test',
+        'services.live.control_token' => 'control-secret',
+    ]);
+
+    Http::fake([
+        'http://live-service.test/streams/'.$liveStream->public_id.'/restart' => Http::response(['ok' => true]),
+    ]);
+
+    $this->actingAs($user)
+        ->post(route('admin.organizations.live-streams.restart', [$organization, $liveStream]))
+        ->assertRedirect(route('admin.organizations.live-streams.show', [$organization, $liveStream]));
+
+    expect($liveStream->refresh()->restart_required)->toBeFalse();
+
+    Http::assertSentCount(1);
+    Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
+        && $request->url() === 'http://live-service.test/streams/'.$liveStream->public_id.'/restart'
+        && $request->hasHeader('Authorization', 'Bearer control-secret'));
 });
 
 test('restart calls live control service and marks stream restarting', function () {
@@ -470,4 +506,7 @@ test('restart calls live control service and marks stream restarting', function 
         ->and($liveStream->restart_required)->toBeFalse();
 
     Http::assertSentCount(1);
+    Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
+        && $request->url() === 'http://live-service.test/streams/'.$liveStream->public_id.'/restart'
+        && $request->hasHeader('Authorization', 'Bearer control-secret'));
 });

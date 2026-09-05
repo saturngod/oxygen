@@ -64,46 +64,46 @@ type liveSession struct {
 	conn      net.Conn
 	closeFn   func()
 
-	mu     sync.RWMutex
-	closed bool
+	mu    sync.RWMutex
+	state liveSessionState
 }
 
-// handle serves an HLS request from the live muxer. It returns false if the
-// session has already been torn down, so the caller can fall back to disk.
-// The lock protects the session state snapshot; gohlslib itself synchronizes
-// concurrent Handle and Close calls.
-func (ls *liveSession) handle(w http.ResponseWriter, r *http.Request) bool {
-	ls.mu.RLock()
-	if ls.closed {
-		ls.mu.RUnlock()
-		return false
-	}
-	if ls.muxer == nil {
-		ls.mu.RUnlock()
-		return false
-	}
-	muxer := ls.muxer
-	ls.mu.RUnlock()
+type liveSessionState uint8
 
-	// gohlslib explicitly supports Handle running concurrently with Close. Do
-	// not hold ls.mu here: playlist requests can wait for initial media, and
-	// close() must remain able to signal those requests through muxer.Close().
-	muxer.Handle(w, r)
+const (
+	liveSessionStarting liveSessionState = iota
+	liveSessionReady
+	liveSessionClosing
+)
+
+func (ls *liveSession) currentState() liveSessionState {
+	ls.mu.RLock()
+	defer ls.mu.RUnlock()
+
+	return ls.state
+}
+
+func (ls *liveSession) markReady() bool {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+
+	if ls.state != liveSessionStarting {
+		return false
+	}
+	ls.state = liveSessionReady
 
 	return true
 }
 
-// close shuts the muxer down exactly once. gohlslib wakes any blocked viewer
-// requests when Close is called.
-func (ls *liveSession) close() {
+func (ls *liveSession) markClosing() {
 	ls.mu.Lock()
-	defer ls.mu.Unlock()
+	ls.state = liveSessionClosing
+	ls.mu.Unlock()
+}
 
-	if ls.closed {
-		return
-	}
-
-	ls.closed = true
+// close shuts down the media output after the reader has drained.
+func (ls *liveSession) close() {
+	ls.markClosing()
 	if ls.muxer != nil {
 		ls.muxer.Close()
 	}
@@ -134,7 +134,16 @@ func New(cfg config.Config, log *slog.Logger) *Server {
 		cfg.FFmpegWriteTimeout = 10 * time.Second
 	}
 	if cfg.FFmpegStallTimeout <= 0 {
-		cfg.FFmpegStallTimeout = 30 * time.Second
+		cfg.FFmpegStallTimeout = 10 * time.Second
+	}
+	if cfg.HLSStartupTimeout <= 0 {
+		cfg.HLSStartupTimeout = 30 * time.Second
+	}
+	if cfg.FFmpegAnalyzeDuration <= 0 {
+		cfg.FFmpegAnalyzeDuration = 1000000
+	}
+	if cfg.FFmpegProbeSize <= 0 {
+		cfg.FFmpegProbeSize = 1048576
 	}
 	laravel := NewLaravelClient(cfg)
 	var analyticsOutbox *AnalyticsOutbox
@@ -427,7 +436,7 @@ func (s *Server) hls(w http.ResponseWriter, r *http.Request) {
 
 	publicID := r.PathValue("publicID")
 	if !validPublicID(publicID) {
-		http.NotFound(w, r)
+		writeHLSNotFound(w, r)
 		return
 	}
 
@@ -435,42 +444,59 @@ func (s *Server) hls(w http.ResponseWriter, r *http.Request) {
 	clean := filepath.Clean(rel)
 
 	if clean == "." || strings.HasPrefix(clean, "..") || filepath.IsAbs(clean) {
-		http.NotFound(w, r)
+		writeHLSNotFound(w, r)
+		return
+	}
+
+	session := s.getLiveSession(publicID)
+	if session == nil {
+		writeHLSNotFound(w, r)
+		return
+	}
+	switch session.currentState() {
+	case liveSessionStarting:
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "live stream is starting", http.StatusServiceUnavailable)
+		return
+	case liveSessionClosing:
+		writeHLSNotFound(w, r)
+		return
+	}
+
+	streamRoot := filepath.Join(s.cfg.HLSRoot, publicID)
+	filePath, ok := containedHLSPath(streamRoot, clean)
+	if !ok {
+		writeHLSNotFound(w, r)
+		return
+	}
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		writeHLSNotFound(w, r)
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+		writeHLSNotFound(w, r)
 		return
 	}
 
 	viewerID := s.viewerID(w, r)
 	s.tracker.Observe(publicID, viewerID, clean, time.Now())
-
-	// The gohlslib muxer sets CDN-friendly per-file Cache-Control headers itself
-	// (no-cache for the low-latency playlist, public max-age for segments), so we
-	// pass the writer through untouched and let it manage caching.
-	if session := s.getLiveSession(publicID); session != nil {
-		if session.handle(w, r) {
-			return
-		}
-	}
-
-	streamRoot := filepath.Join(s.cfg.HLSRoot, publicID)
-	path := filepath.Join(streamRoot, clean)
-
-	// Defence-in-depth: ensure the resolved path is still contained in the
-	// stream's directory even if clean/publicID combined in an unexpected way.
-	if path != streamRoot && !strings.HasPrefix(path, streamRoot+string(os.PathSeparator)) {
-		http.NotFound(w, r)
-		return
-	}
-
-	if _, err := os.Stat(path); err != nil {
-		http.NotFound(w, r)
-		return
-	}
-
-	// Go's http.ServeFile sets no Cache-Control, so set one by file type for the
-	// disk fallback: playlists must always revalidate (live), segments are
-	// uniquely named per muxer run and may be cached indefinitely by a CDN.
 	setHLSCacheHeader(w, clean)
-	http.ServeFile(w, r, path)
+	http.ServeContent(w, r, filepath.Base(clean), info.ModTime(), file)
+}
+
+func containedHLSPath(root string, relative string) (string, bool) {
+	resolved := filepath.Join(root, filepath.Clean(relative))
+	return resolved, resolved != root && strings.HasPrefix(resolved, root+string(os.PathSeparator))
+}
+
+func writeHLSNotFound(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	http.NotFound(w, r)
 }
 
 // setHLSCacheHeader applies a CDN-friendly Cache-Control header based on the

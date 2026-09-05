@@ -14,8 +14,8 @@ func TestRelayStatsConcurrentSnapshots(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < 100; j++ {
-				s.record("video", time.Second)
-				s.record("audio", 2*time.Second)
+				s.recordVideo(time.Second, j%60 == 0)
+				s.recordAudio(2 * time.Second)
 				s.snapshot()
 			}
 		}()

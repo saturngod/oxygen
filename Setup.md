@@ -400,8 +400,11 @@ LIVE_TRUST_PROXY_HEADERS=true
 MAX_TRACKED_VIEWERS=100000
 MAX_RTMP_CONNECTIONS=1000
 MAX_LIVE_TRANSCODERS=2
+LIVE_HLS_STARTUP_TIMEOUT_SECONDS=30
 FFMPEG_RELAY_WRITE_TIMEOUT_SECONDS=10
 FFMPEG_OUTPUT_STALL_TIMEOUT_SECONDS=10
+LIVE_FFMPEG_ANALYZE_DURATION_US=1000000
+LIVE_FFMPEG_PROBE_SIZE_BYTES=1048576
 VIEWER_TTL_SECONDS=45
 ROLLUP_INTERVAL_SECONDS=15
 ```
@@ -640,6 +643,8 @@ server {
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_buffering off;
+        proxy_cache off;
+        proxy_no_cache 1;
         proxy_pass http://127.0.0.1:8081;
     }
 

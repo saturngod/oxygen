@@ -195,6 +195,7 @@ class OrganizationLiveStreamsController extends Controller
         abort_unless($liveStream->organization_id === $organization->id, 404);
 
         if (! $liveStream->isLive()) {
+            $client->restart($liveStream);
             $liveStream->forceFill(['restart_required' => false])->save();
 
             return to_route('admin.organizations.live-streams.show', [$organization, $liveStream])
@@ -223,19 +224,14 @@ class OrganizationLiveStreamsController extends Controller
         $this->authorize('manage', $organization);
         abort_unless($liveStream->organization_id === $organization->id, 404);
 
-        $wasLive = $liveStream->isLive();
-
         $liveStream->forceFill([
             'status' => LiveStreamStatus::Disabled,
             'restart_required' => false,
         ])->save();
 
-        // RTMP auth only happens at connect time, so an already-connected
-        // publisher keeps streaming after the status flips to Disabled. Kick it
-        // now so "disable" actually stops an in-progress broadcast.
-        if ($wasLive) {
-            $client->restart($liveStream);
-        }
+        // Laravel remains idle while the media service is building its initial
+        // HLS window, so always ask the service to disconnect any publisher.
+        $client->restart($liveStream);
 
         return to_route('admin.organizations.live-streams.index', $organization)
             ->with('toast', ['type' => 'success', 'message' => __('Live stream disabled.')]);

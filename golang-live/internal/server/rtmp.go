@@ -113,6 +113,7 @@ func (s *Server) handleRTMPConn(ctx context.Context, conn net.Conn) {
 }
 
 func (s *Server) handleRTMPConnInner(ctx context.Context, conn net.Conn) error {
+	connectionStartedAt := time.Now()
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 
 	rtmpConn := &gortmplib.ServerConn{RW: conn}
@@ -144,18 +145,23 @@ func (s *Server) handleRTMPConnInner(ctx context.Context, conn net.Conn) error {
 	if !auth.Allowed {
 		return fmt.Errorf("publish auth rejected")
 	}
+	s.log.Info("rtmp publisher authenticated", "public_id", publicID, "elapsed", time.Since(connectionStartedAt))
 
 	if !s.reservePublisher(publicID) {
 		return fmt.Errorf("stream %s is already active", publicID)
 	}
 	defer s.releasePublisher(publicID)
+	startupStartedAt := time.Now()
+	startupCtx, cancelStartup := context.WithTimeout(ctx, s.cfg.HLSStartupTimeout)
+	defer cancelStartup()
 
-	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(s.cfg.HLSStartupTimeout))
 
 	reader := &gortmplib.Reader{Conn: rtmpConn}
 	if err := reader.Initialize(); err != nil {
 		return fmt.Errorf("initialize rtmp reader: %w", err)
 	}
+	s.log.Info("rtmp tracks discovered", "public_id", publicID, "elapsed", time.Since(startupStartedAt), "track_count", len(reader.Tracks()))
 
 	hlsDir := filepath.Join(s.cfg.HLSRoot, publicID)
 	// A hard process stop can leave a previous run's files behind. Each public ID
@@ -165,35 +171,35 @@ func (s *Server) handleRTMPConnInner(ctx context.Context, conn net.Conn) error {
 	if err := os.MkdirAll(hlsDir, 0o755); err != nil {
 		return fmt.Errorf("create hls dir: %w", err)
 	}
+	defer s.cleanupHLSDir(hlsDir)
 
 	session := &liveSession{
 		publicID: publicID,
 		conn:     conn,
+		state:    liveSessionStarting,
 	}
-	directFailure := make(chan error, 1)
-	var directFailureOnce sync.Once
+	directFailure := &sessionFailure{}
+	stats := newRelayStats(startupStartedAt)
 	reportDirectFailure := func(err error) {
-		if err == nil {
-			return
-		}
-		directFailureOnce.Do(func() {
-			directFailure <- err
+		if directFailure.set(err) {
 			_ = conn.Close()
-		})
+		}
 	}
 
 	var adaptive *adaptiveHLS
+	minimumReadySegments := 2
 	if len(auth.Stream.Qualities) > 0 {
 		if !s.reserveTranscoder() {
 			return fmt.Errorf("live transcoder capacity reached")
 		}
 		defer s.releaseTranscoder()
 
-		adaptive, err = s.startAdaptiveHLS(ctx, reader, auth.Stream.Qualities, hlsDir, publicID, conn)
+		adaptive, err = s.startAdaptiveHLS(ctx, reader, auth.Stream.Qualities, hlsDir, publicID, conn, stats)
 		if err != nil {
 			return err
 		}
 		session.closeFn = adaptive.close
+		minimumReadySegments = 1
 	} else {
 		hlsTracks, trackMap, err := hlsTracksFromRTMP(reader.Tracks())
 		if err != nil {
@@ -214,15 +220,56 @@ func (s *Server) handleRTMPConnInner(ctx context.Context, conn net.Conn) error {
 			return fmt.Errorf("start hls muxer: %w", err)
 		}
 		session.muxer = muxer
-		wireRTMPToHLS(reader, trackMap, muxer, s.log, publicID, reportDirectFailure)
+		wireRTMPToHLS(reader, trackMap, muxer, s.log, publicID, reportDirectFailure, stats)
 	}
 
-	// Registered before the session-started callback so the HLS output is always
-	// closed and the on-disk HLS tree is always reaped, even if that callback
-	// fails. defer LIFO order on return: end callback -> unregister -> close
-	// muxer -> remove directory.
-	defer s.cleanupHLSDir(hlsDir)
-	defer session.close()
+	if !s.putLiveSession(session) {
+		session.close()
+		return fmt.Errorf("stream %s registration invariant violated", publicID)
+	}
+	pump := startRTMPReader(conn, reader)
+	diagnosticsCtx, stopDiagnostics := context.WithCancel(ctx)
+	defer stopDiagnostics()
+	go s.logLiveDiagnostics(diagnosticsCtx, publicID, hlsDir, stats)
+	defer func() {
+		session.markClosing()
+		_ = conn.Close()
+		if adaptive != nil {
+			adaptive.interruptRelay()
+		}
+		_ = pump.wait()
+		session.close()
+		s.removeLiveSession(publicID, session)
+	}()
+
+	outputFailure := directFailure.get
+	if adaptive != nil {
+		outputFailure = adaptive.currentFailure
+	}
+	readyState, err := waitForHLSReady(startupCtx, hlsDir, minimumReadySegments, pump.done, pump.err, outputFailure)
+	if err != nil {
+		return err
+	}
+	if failure := outputFailure(); failure != nil {
+		return failure
+	}
+	if err := pump.completedError(); err != nil {
+		return fmt.Errorf("RTMP input ended before readiness registration: %w", err)
+	}
+	if !session.markReady() {
+		return fmt.Errorf("stream %s closed while becoming ready", publicID)
+	}
+	renditionReadiness := make(map[string]any, len(readyState.Renditions))
+	for name, rendition := range readyState.Renditions {
+		renditionReadiness[name] = map[string]any{
+			"segments":            rendition.SegmentCount,
+			"first_segment_after": rendition.First.Sub(startupStartedAt),
+		}
+	}
+	s.log.Info("hls output ready", append(stats.snapshot(), "public_id", publicID, "elapsed", time.Since(startupStartedAt), "renditions", renditionReadiness)...)
+	if adaptive != nil {
+		adaptive.startWatchdog(ctx, hlsDir, s.cfg.FFmpegStallTimeout)
+	}
 
 	var startResp SessionStartedResponse
 	if err := s.laravel.Post(ctx, "/internal/live/session-started", SessionStartedRequest{
@@ -238,11 +285,7 @@ func (s *Server) handleRTMPConnInner(ctx context.Context, conn net.Conn) error {
 	if startResp.SessionID == "" {
 		return fmt.Errorf("session start returned an empty session id")
 	}
-
-	if !s.putLiveSession(session) {
-		return fmt.Errorf("stream %s registration invariant violated", publicID)
-	}
-	defer s.removeLiveSession(publicID, session)
+	s.log.Info("live session registered", "public_id", publicID, "elapsed", time.Since(startupStartedAt))
 
 	startedAt := time.Now().UTC()
 	s.tracker.StartSession(publicID, startResp.SessionID, SessionContext{
@@ -273,19 +316,104 @@ func (s *Server) handleRTMPConnInner(ctx context.Context, conn net.Conn) error {
 				return
 			}
 		}
-		select {
-		case failure := <-directFailure:
+		if failure := directFailure.get(); failure != nil {
 			s.failRTMPSession(publicID, startResp.SessionID, failure)
 			return
-		default:
 		}
 		s.endRTMPSession(publicID, startResp.SessionID)
 	}()
 
+	readErr := pump.wait()
+	if failure := outputFailure(); failure != nil {
+		return failure
+	}
+
+	return readErr
+}
+
+type sessionFailure struct {
+	once sync.Once
+	mu   sync.RWMutex
+	err  error
+}
+
+func (failure *sessionFailure) set(err error) bool {
+	if err == nil {
+		return false
+	}
+	set := false
+	failure.once.Do(func() {
+		failure.mu.Lock()
+		failure.err = err
+		failure.mu.Unlock()
+		set = true
+	})
+
+	return set
+}
+
+func (failure *sessionFailure) get() error {
+	failure.mu.RLock()
+	defer failure.mu.RUnlock()
+
+	return failure.err
+}
+
+type rtmpReaderPump struct {
+	done    chan struct{}
+	mu      sync.RWMutex
+	readErr error
+}
+
+func startRTMPReader(conn net.Conn, reader *gortmplib.Reader) *rtmpReaderPump {
+	pump := &rtmpReaderPump{done: make(chan struct{})}
+	go func() {
+		defer close(pump.done)
+		for {
+			_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+			if err := reader.Read(); err != nil {
+				pump.mu.Lock()
+				pump.readErr = err
+				pump.mu.Unlock()
+				return
+			}
+		}
+	}()
+
+	return pump
+}
+
+func (pump *rtmpReaderPump) err() error {
+	pump.mu.RLock()
+	defer pump.mu.RUnlock()
+
+	return pump.readErr
+}
+
+func (pump *rtmpReaderPump) completedError() error {
+	select {
+	case <-pump.done:
+		return pump.err()
+	default:
+		return nil
+	}
+}
+
+func (pump *rtmpReaderPump) wait() error {
+	<-pump.done
+	return pump.err()
+}
+
+func (s *Server) logLiveDiagnostics(ctx context.Context, publicID string, hlsDir string, stats *relayStats) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
 	for {
-		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
-		if err := reader.Read(); err != nil {
-			return err
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			state, err := inspectHLSOutput(hlsDir, 1)
+			s.log.Info("live media diagnostics", append(stats.snapshot(), "public_id", publicID, "rendition_count", len(state.Renditions), "playlist_error", err)...)
 		}
 	}
 }
@@ -468,15 +596,20 @@ func wireRTMPToHLS(
 	log logger,
 	publicID string,
 	reportFailure func(error),
+	stats *relayStats,
 ) {
 	for _, rtmpTrack := range reader.Tracks() {
 		hlsTrack := trackMap[rtmpTrack]
 
 		switch codec := rtmpTrack.Codec.(type) {
 		case *rtmpcodecs.H264:
-			sps, pps := codec.SPS, codec.PPS
-			reader.OnDataH264(rtmpTrack, func(pts time.Duration, _ time.Duration, au [][]byte) {
-				au = withH264ParameterSets(au, sps, pps)
+			filter := h264RelayFilter{sps: codec.SPS, pps: codec.PPS}
+			reader.OnDataH264(rtmpTrack, func(pts time.Duration, dts time.Duration, au [][]byte) {
+				au = filter.process(au)
+				if au == nil {
+					return
+				}
+				stats.recordVideo(dts, h264HasIDR(au))
 				if err := muxer.WriteH264(hlsTrack, time.Now(), toClock(pts, hlsTrack.ClockRate), au); err != nil {
 					log.Warn("write h264 failed", "err", err, "public_id", publicID)
 					reportFailure(fmt.Errorf("write HLS h264: %w", err))
@@ -485,7 +618,8 @@ func wireRTMPToHLS(
 
 		case *rtmpcodecs.H265:
 			vps, sps, pps := codec.VPS, codec.SPS, codec.PPS
-			reader.OnDataH265(rtmpTrack, func(pts time.Duration, _ time.Duration, au [][]byte) {
+			reader.OnDataH265(rtmpTrack, func(pts time.Duration, dts time.Duration, au [][]byte) {
+				stats.recordVideo(dts, h265HasRandomAccess(au))
 				au = withH265ParameterSets(au, vps, sps, pps)
 				if err := muxer.WriteH265(hlsTrack, time.Now(), toClock(pts, hlsTrack.ClockRate), au); err != nil {
 					log.Warn("write h265 failed", "err", err, "public_id", publicID)
@@ -495,6 +629,7 @@ func wireRTMPToHLS(
 
 		case *rtmpcodecs.MPEG4Audio:
 			reader.OnDataMPEG4Audio(rtmpTrack, func(pts time.Duration, au []byte) {
+				stats.recordAudio(pts)
 				if err := muxer.WriteMPEG4Audio(hlsTrack, time.Now(), toClock(pts, hlsTrack.ClockRate), [][]byte{au}); err != nil {
 					log.Warn("write aac failed", "err", err, "public_id", publicID)
 					reportFailure(fmt.Errorf("write HLS aac: %w", err))
@@ -503,6 +638,7 @@ func wireRTMPToHLS(
 
 		case *rtmpcodecs.Opus:
 			reader.OnDataOpus(rtmpTrack, func(pts time.Duration, packet []byte) {
+				stats.recordAudio(pts)
 				if err := muxer.WriteOpus(hlsTrack, time.Now(), toClock(pts, hlsTrack.ClockRate), [][]byte{packet}); err != nil {
 					log.Warn("write opus failed", "err", err, "public_id", publicID)
 					reportFailure(fmt.Errorf("write HLS opus: %w", err))
@@ -526,6 +662,30 @@ const (
 	h265NALUTypeIRAPFirst = 16
 	h265NALUTypeIRAPLast  = 23
 )
+
+func h264HasIDR(au [][]byte) bool {
+	for _, nalu := range au {
+		if len(nalu) != 0 && nalu[0]&0x1f == h264NALUTypeIDR {
+			return true
+		}
+	}
+
+	return false
+}
+
+func h265HasRandomAccess(au [][]byte) bool {
+	for _, nalu := range au {
+		if len(nalu) == 0 {
+			continue
+		}
+		naluType := (nalu[0] >> 1) & 0x3f
+		if naluType >= h265NALUTypeIRAPFirst && naluType <= h265NALUTypeIRAPLast {
+			return true
+		}
+	}
+
+	return false
+}
 
 // withH264ParameterSets prepends the SPS/PPS carried by the RTMP AVC sequence
 // header to every key frame that does not already repeat them in-band.

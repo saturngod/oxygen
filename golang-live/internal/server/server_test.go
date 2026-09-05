@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -14,9 +15,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/bluenviron/gohlslib/v2"
-	hlscodecs "github.com/bluenviron/gohlslib/v2/pkg/codecs"
 
 	"oxygen/live/internal/config"
 )
@@ -51,6 +49,30 @@ func TestRestartRequiresControlToken(t *testing.T) {
 
 	if res.Code != http.StatusAccepted {
 		t.Fatalf("expected 202, got %d", res.Code)
+	}
+}
+
+func TestRestartDisconnectsPublisherWhileStreamIsStarting(t *testing.T) {
+	publisher, peer := net.Pipe()
+	defer peer.Close()
+	srv := New(config.Config{
+		ControlToken:   "secret",
+		ViewerTTL:      45 * time.Second,
+		RollupInterval: time.Hour,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv.putLiveSession(&liveSession{publicID: "public-1", conn: publisher, state: liveSessionStarting})
+
+	req := httptest.NewRequest(http.MethodPost, "/streams/public-1/restart", nil)
+	req.Header.Set("Authorization", "Bearer secret")
+	res := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(res, req)
+
+	if res.Code != http.StatusAccepted || !strings.Contains(res.Body.String(), `"disconnected":true`) {
+		t.Fatalf("unexpected restart response: %d %s", res.Code, res.Body.String())
+	}
+	_ = peer.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := peer.Read(make([]byte, 1)); err == nil {
+		t.Fatal("starting publisher connection remained open")
 	}
 }
 
@@ -121,6 +143,7 @@ func TestHLSServingTracksViewerPresence(t *testing.T) {
 		RollupInterval: time.Hour,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	srv.tracker.StartSession("public-1", "session-1")
+	srv.putLiveSession(&liveSession{publicID: "public-1", state: liveSessionReady})
 
 	req := httptest.NewRequest(http.MethodGet, "/live/public-1/index.m3u8", nil)
 	res := httptest.NewRecorder()
@@ -142,6 +165,49 @@ func TestHLSServingTracksViewerPresence(t *testing.T) {
 	}
 }
 
+func TestHLSStartingStreamReturnsRetryableServiceUnavailableWithoutTracking(t *testing.T) {
+	srv := New(config.Config{
+		HLSRoot:        t.TempDir(),
+		ViewerTTL:      45 * time.Second,
+		RollupInterval: time.Hour,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv.putLiveSession(&liveSession{publicID: "public-1", state: liveSessionStarting})
+
+	req := httptest.NewRequest(http.MethodGet, "/live/public-1/index.m3u8", nil)
+	res := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(res, req)
+
+	if res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", res.Code)
+	}
+	if res.Header().Get("Retry-After") != "1" || res.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("unexpected startup headers: %v", res.Header())
+	}
+	if snapshots := srv.tracker.Snapshots(time.Now()); len(snapshots) != 0 {
+		t.Fatalf("startup probe created viewer analytics: %#v", snapshots)
+	}
+}
+
+func TestHLSMissingMediaReturnsNoStoreWithoutTracking(t *testing.T) {
+	srv := New(config.Config{
+		HLSRoot:        t.TempDir(),
+		ViewerTTL:      45 * time.Second,
+		RollupInterval: time.Hour,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv.putLiveSession(&liveSession{publicID: "public-1", state: liveSessionReady})
+
+	req := httptest.NewRequest(http.MethodGet, "/live/public-1/missing.m4s", nil)
+	res := httptest.NewRecorder()
+	srv.Routes().ServeHTTP(res, req)
+
+	if res.Code != http.StatusNotFound || res.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("expected uncached 404, got %d with %v", res.Code, res.Header())
+	}
+	if snapshots := srv.tracker.Snapshots(time.Now()); len(snapshots) != 0 {
+		t.Fatalf("missing media created viewer analytics: %#v", snapshots)
+	}
+}
+
 func TestHLSServingUsesStableFingerprintWithoutCookies(t *testing.T) {
 	root := t.TempDir()
 	streamDir := filepath.Join(root, "public-1")
@@ -158,6 +224,7 @@ func TestHLSServingUsesStableFingerprintWithoutCookies(t *testing.T) {
 		RollupInterval: time.Hour,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	srv.tracker.StartSession("public-1", "session-1")
+	srv.putLiveSession(&liveSession{publicID: "public-1", state: liveSessionReady})
 
 	for range 3 {
 		req := httptest.NewRequest(http.MethodGet, "/live/public-1/index.m3u8", nil)
@@ -357,13 +424,22 @@ func TestHLSServingDoesNotTrackUnknownStreams(t *testing.T) {
 }
 
 func TestViewerFingerprintIgnoresForwardedHeadersByDefault(t *testing.T) {
+	root := t.TempDir()
+	streamDir := filepath.Join(root, "public-1")
+	if err := os.MkdirAll(streamDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(streamDir, "index.m3u8"), []byte("#EXTM3U\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	srv := New(config.Config{
-		HLSRoot:           t.TempDir(),
+		HLSRoot:           root,
 		ViewerTTL:         45 * time.Second,
 		RollupInterval:    time.Hour,
 		MaxTrackedViewers: 100,
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	srv.tracker.StartSession("public-1", "session-1")
+	srv.putLiveSession(&liveSession{publicID: "public-1", state: liveSessionReady})
 
 	for _, forwardedFor := range []string{"198.51.100.1", "198.51.100.2"} {
 		req := httptest.NewRequest(http.MethodGet, "/live/public-1/index.m3u8", nil)
@@ -465,48 +541,6 @@ func TestLiveTranscoderCapacityIsBounded(t *testing.T) {
 	srv.releaseTranscoder()
 	if !srv.reserveTranscoder() {
 		t.Fatal("expected transcoder reservation after release to succeed")
-	}
-}
-
-func TestLiveSessionCloseWakesPlaylistWaitingForInitialMedia(t *testing.T) {
-	muxer := &gohlslib.Muxer{
-		Variant: gohlslib.MuxerVariantFMP4,
-		Tracks: []*gohlslib.Track{{
-			Codec: &hlscodecs.H264{
-				SPS: []byte{0x67, 0x42, 0x00, 0x1e, 0x95, 0xa8, 0x14, 0x01, 0x6e, 0x9b, 0x80},
-				PPS: []byte{0x68, 0xce, 0x06, 0xe2},
-			},
-			ClockRate: 90000,
-		}},
-	}
-	if err := muxer.Start(); err != nil {
-		t.Fatal(err)
-	}
-
-	session := &liveSession{muxer: muxer}
-	handlerDone := make(chan struct{})
-	go func() {
-		req := httptest.NewRequest(http.MethodGet, "/index.m3u8", nil)
-		session.handle(httptest.NewRecorder(), req)
-		close(handlerDone)
-	}()
-
-	time.Sleep(50 * time.Millisecond)
-	closeDone := make(chan struct{})
-	go func() {
-		session.close()
-		close(closeDone)
-	}()
-
-	select {
-	case <-closeDone:
-	case <-time.After(time.Second):
-		t.Fatal("session close deadlocked behind playlist request")
-	}
-	select {
-	case <-handlerDone:
-	case <-time.After(time.Second):
-		t.Fatal("playlist request was not released by muxer close")
 	}
 }
 
