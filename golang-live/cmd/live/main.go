@@ -21,7 +21,7 @@ func main() {
 	srv := server.New(cfg, log)
 	if err := srv.Prepare(); err != nil {
 		log.Error("live service preparation failed", "err", err)
-		return
+		os.Exit(1)
 	}
 
 	httpServer := &http.Server{

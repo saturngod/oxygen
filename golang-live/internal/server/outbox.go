@@ -42,8 +42,27 @@ func (o *CallbackOutbox) Prepare() error {
 	if err := os.MkdirAll(o.root, 0o700); err != nil {
 		return fmt.Errorf("create callback outbox: %w", err)
 	}
+	probe, err := os.CreateTemp(o.root, ".write-check-*")
+	if err != nil {
+		return fmt.Errorf("callback outbox write check: %w", err)
+	}
+	defer os.Remove(probe.Name())
+	if _, err := probe.Write([]byte("probe")); err != nil {
+		_ = probe.Close()
+		return err
+	}
+	if err := probe.Sync(); err != nil {
+		_ = probe.Close()
+		return err
+	}
+	if err := probe.Close(); err != nil {
+		return err
+	}
+	if err := os.Remove(probe.Name()); err != nil {
+		return err
+	}
 
-	return nil
+	return syncDirectory(o.root)
 }
 
 func (o *CallbackOutbox) Enqueue(path string, payload any) error {
@@ -163,16 +182,32 @@ func (o *CallbackOutbox) flush(ctx context.Context) {
 
 		var envelope callbackEnvelope
 		if err := json.Unmarshal(body, &envelope); err != nil {
-			o.log.Error("invalid callback outbox entry", "err", err, "file", entry.Name())
+			if quarantineErr := quarantineOutboxEntry(o.root, entryPath); quarantineErr != nil {
+				o.log.Error("invalid callback outbox entry could not be quarantined", "err", quarantineErr, "file", entry.Name())
+				return
+			}
+			o.log.Error("invalid callback outbox entry moved to dead letter", "err", err, "file", entry.Name())
 			continue
 		}
 
 		if !json.Valid(envelope.Payload) {
-			o.log.Error("invalid callback outbox payload", "file", entry.Name())
+			if quarantineErr := quarantineOutboxEntry(o.root, entryPath); quarantineErr != nil {
+				o.log.Error("invalid callback outbox payload could not be quarantined", "err", quarantineErr, "file", entry.Name())
+				return
+			}
+			o.log.Error("invalid callback outbox payload moved to dead letter", "file", entry.Name())
 			continue
 		}
 
 		if err := o.laravel.Post(ctx, envelope.Path, envelope.Payload, nil); err != nil {
+			if isPermanentDeliveryError(err) {
+				if quarantineErr := quarantineOutboxEntry(o.root, entryPath); quarantineErr != nil {
+					o.log.Error("permanent callback could not be quarantined", "err", quarantineErr, "file", entry.Name())
+					return
+				}
+				o.log.Error("permanent callback moved to dead letter", "err", err, "path", envelope.Path, "file", entry.Name())
+				continue
+			}
 			o.log.Warn("callback delivery failed", "err", err, "path", envelope.Path, "file", entry.Name())
 			return
 		}
@@ -184,4 +219,20 @@ func (o *CallbackOutbox) flush(ctx context.Context) {
 
 		o.log.Info("callback delivered", "path", envelope.Path, "file", entry.Name())
 	}
+}
+
+func quarantineOutboxEntry(root, entryPath string) error {
+	deadLetterRoot := filepath.Join(root, "dead-letter")
+	if err := os.MkdirAll(deadLetterRoot, 0o700); err != nil {
+		return err
+	}
+	destination := filepath.Join(deadLetterRoot, filepath.Base(entryPath))
+	if err := os.Rename(entryPath, destination); err != nil {
+		return err
+	}
+	if err := syncDirectory(deadLetterRoot); err != nil {
+		return err
+	}
+
+	return syncDirectory(root)
 }

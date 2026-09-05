@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,6 +69,49 @@ func TestAnalyticsOutboxRetainsBatchOnServiceFailure(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Fatalf("expected failed delivery to remain durable, got %d entries", len(entries))
+	}
+}
+
+func TestAnalyticsOutboxQuarantinesPermanentFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		http.Error(writer, "invalid event", http.StatusUnprocessableEntity)
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	client := NewAnalyticsClient(config.Config{AnalyticsURL: server.URL, AnalyticsToken: "analytics-token"})
+	outbox := NewAnalyticsOutbox(root, client, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := outbox.Enqueue(AnalyticsEventBatch{Events: []AnalyticsEvent{{EventID: "event-1"}}}); err != nil {
+		t.Fatal(err)
+	}
+	outbox.flush(context.Background())
+
+	deadLetters, err := os.ReadDir(filepath.Join(root, "dead-letter"))
+	if err != nil || len(deadLetters) != 1 {
+		t.Fatalf("expected one dead-letter analytics batch, err=%v entries=%d", err, len(deadLetters))
+	}
+}
+
+func TestAnalyticsOutboxRetainsAuthenticationFailureForReplay(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		http.Error(writer, "token rotation in progress", http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	client := NewAnalyticsClient(config.Config{AnalyticsURL: server.URL, AnalyticsToken: "old-token"})
+	outbox := NewAnalyticsOutbox(root, client, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := outbox.Enqueue(AnalyticsEventBatch{Events: []AnalyticsEvent{{EventID: "event-1"}}}); err != nil {
+		t.Fatal(err)
+	}
+	outbox.flush(context.Background())
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].IsDir() || !strings.HasSuffix(entries[0].Name(), ".json") {
+		t.Fatalf("expected authentication failure to remain queued, got %+v", entries)
 	}
 }
 

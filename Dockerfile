@@ -52,7 +52,7 @@ RUN mkdir -p bootstrap/cache \
 
 
 # ── Stage 4: build the Go services ──────────────────────────
-FROM golang:1.25.1-bookworm AS go-build
+FROM golang:1.25.13-bookworm AS go-build
 WORKDIR /src
 
 # golang-queue (VOD transcode worker)

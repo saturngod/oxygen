@@ -1,6 +1,7 @@
 package server
 
 import (
+	"container/list"
 	"sync"
 	"time"
 )
@@ -22,6 +23,8 @@ type streamMetrics struct {
 	OrganizationID         string
 	LiveStreamID           string
 	Viewers                map[string]time.Time
+	viewerOrder            *list.List
+	viewerElements         map[string]*list.Element
 	UniqueViewers          map[string]struct{}
 	PlaylistRequests       int64
 	SegmentRequests        int64
@@ -67,6 +70,8 @@ func (t *Tracker) StartSession(publicID, sessionID string, contexts ...SessionCo
 	m := t.metrics(publicID)
 	m.SessionID = sessionID
 	m.Viewers = make(map[string]time.Time)
+	m.viewerOrder = list.New()
+	m.viewerElements = make(map[string]*list.Element)
 	m.UniqueViewers = make(map[string]struct{})
 	m.PlaylistRequests = 0
 	m.SegmentRequests = 0
@@ -136,8 +141,14 @@ func (t *Tracker) Observe(publicID, viewerID, path string, now time.Time) bool {
 		return false
 	}
 
+	t.currentLocked(m, now)
 	if _, exists := m.Viewers[viewerID]; exists || len(m.Viewers) < t.maxTrackedViewers {
 		m.Viewers[viewerID] = now
+		if element := m.viewerElements[viewerID]; element != nil {
+			m.viewerOrder.MoveToBack(element)
+		} else {
+			m.viewerElements[viewerID] = m.viewerOrder.PushBack(viewerID)
+		}
 	}
 	if _, exists := m.UniqueViewers[viewerID]; !exists && len(m.UniqueViewers) < t.maxTrackedViewers {
 		m.UniqueViewers[viewerID] = struct{}{}
@@ -152,7 +163,7 @@ func (t *Tracker) Observe(publicID, viewerID, path string, now time.Time) bool {
 		m.SegmentRequestsDelta++
 	}
 
-	current := t.currentLocked(m, now)
+	current := len(m.Viewers)
 	if current > m.PeakViewers {
 		m.PeakViewers = current
 	}
@@ -245,10 +256,15 @@ func (t *Tracker) metrics(publicID string) *streamMetrics {
 
 func (t *Tracker) currentLocked(m *streamMetrics, now time.Time) int {
 	cutoff := now.Add(-t.ttl)
-	for viewerID, seenAt := range m.Viewers {
-		if seenAt.Before(cutoff) {
-			delete(m.Viewers, viewerID)
+	for m.viewerOrder != nil && m.viewerOrder.Len() > 0 {
+		element := m.viewerOrder.Front()
+		viewerID := element.Value.(string)
+		if !m.Viewers[viewerID].Before(cutoff) {
+			break
 		}
+		delete(m.Viewers, viewerID)
+		delete(m.viewerElements, viewerID)
+		m.viewerOrder.Remove(element)
 	}
 
 	return len(m.Viewers)

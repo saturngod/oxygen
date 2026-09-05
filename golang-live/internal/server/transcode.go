@@ -25,6 +25,29 @@ type adaptiveHLS struct {
 	relayConn net.Conn
 	command   *exec.Cmd
 	done      <-chan error
+	failure   chan error
+	failOnce  sync.Once
+	publisher net.Conn
+}
+
+func (output *adaptiveHLS) reportFailure(err error) {
+	if err == nil {
+		return
+	}
+
+	output.failOnce.Do(func() {
+		output.failure <- err
+		_ = output.publisher.Close()
+	})
+}
+
+func (output *adaptiveHLS) currentFailure() error {
+	select {
+	case err := <-output.failure:
+		return err
+	default:
+		return nil
+	}
 }
 
 func (output *adaptiveHLS) close() {
@@ -68,7 +91,8 @@ func (s *Server) startAdaptiveHLS(
 
 	runCtx, cancel := context.WithCancel(ctx)
 	inputURL := "rtmp://" + listener.Addr().String() + "/live/source"
-	args := buildLiveFFmpegArgs(inputURL, hlsDir, renditions, hasAudio, s.cfg.FFmpegVideoCodec)
+	mediaPrefix := randomHex(8)
+	args := buildLiveFFmpegArgs(inputURL, hlsDir, renditions, hasAudio, s.cfg.FFmpegVideoCodec, mediaPrefix)
 	command := exec.CommandContext(runCtx, s.cfg.FFmpegBin, args...)
 	command.Stderr = os.Stderr
 
@@ -79,17 +103,27 @@ func (s *Server) startAdaptiveHLS(
 	}
 
 	done := make(chan error, 1)
-	go func() {
-		done <- command.Wait()
-		_ = publisherConn.Close()
-	}()
-
 	output := &adaptiveHLS{
-		cancel:   cancel,
-		listener: listener,
-		command:  command,
-		done:     done,
+		cancel:    cancel,
+		listener:  listener,
+		command:   command,
+		done:      done,
+		failure:   make(chan error, 1),
+		publisher: publisherConn,
 	}
+
+	go func() {
+		err := command.Wait()
+		if runCtx.Err() == nil {
+			if err == nil {
+				err = fmt.Errorf("ffmpeg exited unexpectedly")
+			} else {
+				err = fmt.Errorf("ffmpeg exited unexpectedly: %w", err)
+			}
+			output.reportFailure(err)
+		}
+		done <- err
+	}()
 
 	if tcpListener, ok := listener.(*net.TCPListener); ok {
 		_ = tcpListener.SetDeadline(time.Now().Add(ffmpegConnectTimeout))
@@ -117,7 +151,7 @@ func (s *Server) startAdaptiveHLS(
 		output.close()
 		return nil, fmt.Errorf("ffmpeg relay unexpectedly published")
 	}
-	_ = relayConn.SetDeadline(time.Time{})
+	_ = relayConn.SetReadDeadline(time.Time{})
 
 	writer := &gortmplib.Writer{Conn: serverConn, Tracks: reader.Tracks()}
 	if err := writer.Initialize(); err != nil {
@@ -125,7 +159,8 @@ func (s *Server) startAdaptiveHLS(
 		return nil, fmt.Errorf("initialize ffmpeg relay writer: %w", err)
 	}
 
-	wireRTMPToWriter(reader, writer, s.log, publicID, publisherConn)
+	wireRTMPToWriter(reader, writer, s.log, publicID, relayConn, s.cfg.FFmpegWriteTimeout, output.reportFailure)
+	go watchAdaptiveHLS(runCtx, output, hlsDir, s.cfg.FFmpegStallTimeout)
 	s.log.Info("adaptive live transcoder started", "public_id", publicID, "qualities", qualities)
 
 	return output, nil
@@ -137,6 +172,7 @@ func buildLiveFFmpegArgs(
 	renditions []quality.Rendition,
 	hasAudio bool,
 	videoCodec string,
+	mediaPrefix string,
 ) []string {
 	args := []string{"-hide_banner", "-loglevel", "warning", "-y", "-i", inputURL}
 
@@ -189,8 +225,8 @@ func buildLiveFFmpegArgs(
 		"-hls_delete_threshold", "2",
 		"-hls_segment_type", "fmp4",
 		"-hls_flags", "delete_segments+independent_segments+temp_file",
-		"-hls_fmp4_init_filename", "init.mp4",
-		"-hls_segment_filename", filepath.Join(outputDir, "v%v", "segment_%09d.m4s"),
+		"-hls_fmp4_init_filename", mediaPrefix+"_init.mp4",
+		"-hls_segment_filename", filepath.Join(outputDir, "v%v", mediaPrefix+"_segment_%09d.m4s"),
 		"-master_pl_name", "index.m3u8",
 	)
 
@@ -224,18 +260,22 @@ func wireRTMPToWriter(
 	writer *gortmplib.Writer,
 	log logger,
 	publicID string,
-	publisherConn net.Conn,
+	relayConn net.Conn,
+	writeTimeout time.Duration,
+	reportFailure func(error),
 ) {
 	var writerMu sync.Mutex
-	var disconnectOnce sync.Once
 
 	write := func(callback func() error) {
 		writerMu.Lock()
-		err := callback()
+		err := relayConn.SetWriteDeadline(time.Now().Add(writeTimeout))
+		if err == nil {
+			err = callback()
+		}
 		writerMu.Unlock()
 		if err != nil {
 			log.Warn("ffmpeg relay write failed", "err", err, "public_id", publicID)
-			disconnectOnce.Do(func() { _ = publisherConn.Close() })
+			reportFailure(fmt.Errorf("ffmpeg relay write failed: %w", err))
 		}
 	}
 
@@ -259,4 +299,66 @@ func wireRTMPToWriter(
 			})
 		}
 	}
+}
+
+func watchAdaptiveHLS(ctx context.Context, output *adaptiveHLS, root string, timeout time.Duration) {
+	interval := timeout / 3
+	if interval > 5*time.Second {
+		interval = 5 * time.Second
+	}
+	if interval < 100*time.Millisecond {
+		interval = 100 * time.Millisecond
+	}
+
+	startedAt := time.Now()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			latest, found := latestAdaptiveSegment(root)
+			if (!found && now.Sub(startedAt) > timeout) || (found && now.Sub(latest) > timeout) {
+				output.reportFailure(fmt.Errorf("adaptive HLS output stalled for more than %s", timeout))
+				return
+			}
+		}
+	}
+}
+
+func latestAdaptiveSegment(root string) (time.Time, bool) {
+	variants, err := os.ReadDir(root)
+	if err != nil {
+		return time.Time{}, false
+	}
+
+	var latest time.Time
+	found := false
+	for _, variant := range variants {
+		if !variant.IsDir() || !strings.HasPrefix(variant.Name(), "v") {
+			continue
+		}
+
+		entries, err := os.ReadDir(filepath.Join(root, variant.Name()))
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".m4s") {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			if !found || info.ModTime().After(latest) {
+				latest = info.ModTime()
+				found = true
+			}
+		}
+	}
+
+	return latest, found
 }

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 )
 
@@ -18,10 +20,11 @@ type analyticsOutboxEnvelope struct {
 }
 
 type AnalyticsOutbox struct {
-	root   string
-	client *AnalyticsClient
-	log    *slog.Logger
-	wake   chan struct{}
+	enqueueMu sync.Mutex
+	root      string
+	client    *AnalyticsClient
+	log       *slog.Logger
+	wake      chan struct{}
 }
 
 func NewAnalyticsOutbox(root string, client *AnalyticsClient, log *slog.Logger) *AnalyticsOutbox {
@@ -39,6 +42,8 @@ func (o *AnalyticsOutbox) Prepare() error {
 }
 
 func (o *AnalyticsOutbox) Enqueue(batch AnalyticsEventBatch) error {
+	o.enqueueMu.Lock()
+	defer o.enqueueMu.Unlock()
 	if len(batch.Events) == 0 {
 		return nil
 	}
@@ -48,6 +53,9 @@ func (o *AnalyticsOutbox) Enqueue(batch AnalyticsEventBatch) error {
 	body, err := json.Marshal(analyticsOutboxEnvelope{Batch: batch, CreatedAt: time.Now().UTC()})
 	if err != nil {
 		return fmt.Errorf("marshal analytics outbox entry: %w", err)
+	}
+	if err := checkAnalyticsCapacity(o.root, int64(len(body))); err != nil {
+		return err
 	}
 	finalPath := filepath.Join(o.root, time.Now().UTC().Format("20060102T150405.000000000")+"-"+randomHex(8)+".json")
 	temporaryPath := finalPath + ".tmp"
@@ -64,6 +72,43 @@ func (o *AnalyticsOutbox) Enqueue(batch AnalyticsEventBatch) error {
 	select {
 	case o.wake <- struct{}{}:
 	default:
+	}
+	return nil
+}
+
+// Optional telemetry must leave space for media and mandatory lifecycle events.
+// Include dead letters and abandoned temporary files in the storage budget.
+func checkAnalyticsCapacity(root string, incoming int64) error {
+	const maxBytes = 64 << 20
+	const maxFiles = 10000
+	const reserveBytes = 256 << 20
+	var size int64
+	files := 0
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if os.IsNotExist(err) {
+			return nil // A concurrent delivery can remove an entry.
+		}
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			size += info.Size()
+			files++
+		}
+		if size+incoming > maxBytes || files >= maxFiles {
+			return fmt.Errorf("analytics backlog limit reached: bytes=%d files=%d", size, files)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(root, &stat); err != nil {
+		return err
+	}
+	if uint64(stat.Bavail)*uint64(stat.Bsize) < reserveBytes+uint64(incoming) {
+		return fmt.Errorf("analytics storage pressure: preserving 256 MiB free space")
 	}
 	return nil
 }
@@ -106,10 +151,22 @@ func (o *AnalyticsOutbox) flush(ctx context.Context) {
 		}
 		var envelope analyticsOutboxEnvelope
 		if err := json.Unmarshal(body, &envelope); err != nil {
-			o.log.Error("invalid analytics outbox entry", "err", err, "file", entry.Name())
+			if quarantineErr := quarantineOutboxEntry(o.root, entryPath); quarantineErr != nil {
+				o.log.Error("invalid analytics outbox entry could not be quarantined", "err", quarantineErr, "file", entry.Name())
+				return
+			}
+			o.log.Error("invalid analytics outbox entry moved to dead letter", "err", err, "file", entry.Name())
 			continue
 		}
 		if err := o.client.PostBatch(ctx, envelope.Batch); err != nil {
+			if isPermanentDeliveryError(err) {
+				if quarantineErr := quarantineOutboxEntry(o.root, entryPath); quarantineErr != nil {
+					o.log.Error("permanent analytics batch could not be quarantined", "err", quarantineErr, "file", entry.Name())
+					return
+				}
+				o.log.Error("permanent analytics batch moved to dead letter", "err", err, "file", entry.Name())
+				continue
+			}
 			o.log.Warn("analytics delivery failed", "err", err, "file", entry.Name())
 			return
 		}

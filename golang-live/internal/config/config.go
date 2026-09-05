@@ -28,6 +28,9 @@ type Config struct {
 	RollupInterval       time.Duration
 	MaxTrackedViewers    int
 	MaxRTMPConnections   int
+	MaxLiveTranscoders   int
+	FFmpegWriteTimeout   time.Duration
+	FFmpegStallTimeout   time.Duration
 }
 
 func Load() Config {
@@ -54,6 +57,9 @@ func Load() Config {
 		RollupInterval:       secondsEnv("ROLLUP_INTERVAL_SECONDS", 15),
 		MaxTrackedViewers:    intEnv("MAX_TRACKED_VIEWERS", 100000),
 		MaxRTMPConnections:   intEnv("MAX_RTMP_CONNECTIONS", 1000),
+		MaxLiveTranscoders:   intEnv("MAX_LIVE_TRANSCODERS", 2),
+		FFmpegWriteTimeout:   secondsEnv("FFMPEG_RELAY_WRITE_TIMEOUT_SECONDS", 10),
+		FFmpegStallTimeout:   secondsEnv("FFMPEG_OUTPUT_STALL_TIMEOUT_SECONDS", 30),
 	}
 }
 

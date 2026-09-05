@@ -1,6 +1,6 @@
 module oxygen/live
 
-go 1.25.1
+go 1.25.13
 
 require (
 	github.com/bluenviron/gohlslib/v2 v2.3.2

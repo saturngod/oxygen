@@ -111,7 +111,8 @@ func (c *AnalyticsClient) doPost(ctx context.Context, body []byte) (bool, error)
 		return true, fmt.Errorf("analytics returned %d", response.StatusCode)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return false, fmt.Errorf("analytics returned %d", response.StatusCode)
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 2048))
+		return false, &deliveryHTTPError{status: response.StatusCode, body: string(body)}
 	}
 	return false, nil
 }

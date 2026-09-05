@@ -7,10 +7,12 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -44,10 +46,11 @@ type Server struct {
 	streams    map[string]*liveSession
 	publishers map[string]struct{}
 
-	rtmpMu    sync.Mutex
-	rtmpConns map[net.Conn]struct{}
-	rtmpWG    sync.WaitGroup
-	rtmpSlots chan struct{}
+	rtmpMu         sync.Mutex
+	rtmpConns      map[net.Conn]struct{}
+	rtmpWG         sync.WaitGroup
+	rtmpSlots      chan struct{}
+	transcodeSlots chan struct{}
 
 	recovered     atomic.Bool
 	rtmpListening atomic.Bool
@@ -67,26 +70,31 @@ type liveSession struct {
 
 // handle serves an HLS request from the live muxer. It returns false if the
 // session has already been torn down, so the caller can fall back to disk.
-// The read lock is held for the duration of the muxer call, which is what
-// makes it safe against a concurrent close() / muxer.Close().
+// The lock protects the session state snapshot; gohlslib itself synchronizes
+// concurrent Handle and Close calls.
 func (ls *liveSession) handle(w http.ResponseWriter, r *http.Request) bool {
 	ls.mu.RLock()
-	defer ls.mu.RUnlock()
-
 	if ls.closed {
+		ls.mu.RUnlock()
 		return false
 	}
 	if ls.muxer == nil {
+		ls.mu.RUnlock()
 		return false
 	}
+	muxer := ls.muxer
+	ls.mu.RUnlock()
 
-	ls.muxer.Handle(w, r)
+	// gohlslib explicitly supports Handle running concurrently with Close. Do
+	// not hold ls.mu here: playlist requests can wait for initial media, and
+	// close() must remain able to signal those requests through muxer.Close().
+	muxer.Handle(w, r)
 
 	return true
 }
 
-// close shuts the muxer down exactly once, blocking until no viewer request is
-// mid-flight (via the same RWMutex handle() uses).
+// close shuts the muxer down exactly once. gohlslib wakes any blocked viewer
+// requests when Close is called.
 func (ls *liveSession) close() {
 	ls.mu.Lock()
 	defer ls.mu.Unlock()
@@ -119,6 +127,15 @@ func New(cfg config.Config, log *slog.Logger) *Server {
 	if cfg.MaxRTMPConnections <= 0 {
 		cfg.MaxRTMPConnections = 1000
 	}
+	if cfg.MaxLiveTranscoders <= 0 {
+		cfg.MaxLiveTranscoders = 2
+	}
+	if cfg.FFmpegWriteTimeout <= 0 {
+		cfg.FFmpegWriteTimeout = 10 * time.Second
+	}
+	if cfg.FFmpegStallTimeout <= 0 {
+		cfg.FFmpegStallTimeout = 30 * time.Second
+	}
 	laravel := NewLaravelClient(cfg)
 	var analyticsOutbox *AnalyticsOutbox
 	if cfg.AnalyticsURL != "" && cfg.AnalyticsToken != "" {
@@ -136,10 +153,42 @@ func New(cfg config.Config, log *slog.Logger) *Server {
 		publishers:      make(map[string]struct{}),
 		rtmpConns:       make(map[net.Conn]struct{}),
 		rtmpSlots:       make(chan struct{}, cfg.MaxRTMPConnections),
+		transcodeSlots:  make(chan struct{}, cfg.MaxLiveTranscoders),
 	}
 }
 
 func (s *Server) Prepare() error {
+	if strings.TrimSpace(s.cfg.ServiceToken) == "" {
+		return fmt.Errorf("LIVE_SERVICE_TOKEN must not be empty")
+	}
+	if strings.TrimSpace(s.cfg.ControlToken) == "" && !s.cfg.AllowInsecureControl {
+		return fmt.Errorf("LIVE_CONTROL_TOKEN must not be empty unless LIVE_ALLOW_INSECURE_CONTROL is enabled")
+	}
+	if strings.TrimSpace(s.cfg.HLSRoot) == "" {
+		return fmt.Errorf("LIVE_HLS_ROOT must not be empty")
+	}
+	if (s.cfg.AnalyticsURL == "") != (s.cfg.AnalyticsToken == "") {
+		return fmt.Errorf("ANALYTICS_URL and ANALYTICS_INGEST_TOKEN must be configured together")
+	}
+	if _, err := exec.LookPath(s.cfg.FFmpegBin); err != nil {
+		return fmt.Errorf("find ffmpeg binary %q: %w", s.cfg.FFmpegBin, err)
+	}
+	if err := os.MkdirAll(s.cfg.HLSRoot, 0o755); err != nil {
+		return fmt.Errorf("create HLS root: %w", err)
+	}
+	probe, err := os.CreateTemp(s.cfg.HLSRoot, ".oxygen-write-check-*")
+	if err != nil {
+		return fmt.Errorf("HLS root is not writable: %w", err)
+	}
+	probePath := probe.Name()
+	if err := probe.Close(); err != nil {
+		_ = os.Remove(probePath)
+		return fmt.Errorf("close HLS root write check: %w", err)
+	}
+	if err := os.Remove(probePath); err != nil {
+		return fmt.Errorf("remove HLS root write check: %w", err)
+	}
+
 	if err := s.outbox.Prepare(); err != nil {
 		return err
 	}
@@ -147,13 +196,24 @@ func (s *Server) Prepare() error {
 	s.outboxHealthy.Store(true)
 	if s.analyticsOutbox != nil {
 		if err := s.analyticsOutbox.Prepare(); err != nil {
-			s.log.Error("analytics outbox preparation failed", "err", err)
-			// Analytics is deliberately fail-open for media delivery. The live
-			// service remains healthy while an operator repairs the outbox.
+			s.log.Error("analytics outbox preparation failed; analytics delivery is disabled until storage recovers", "err", err)
 		}
 	}
 
 	return nil
+}
+
+func (s *Server) reserveTranscoder() bool {
+	select {
+	case s.transcodeSlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) releaseTranscoder() {
+	<-s.transcodeSlots
 }
 
 func (s *Server) RunCallbacks(ctx context.Context) {

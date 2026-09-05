@@ -14,7 +14,8 @@ mkdir -p \
     bootstrap/cache \
     "${WORK_DIR:-/tmp/transcoder}" \
     "${LIVE_HLS_ROOT:-/var/lib/oxygen-live/hls}" \
-    "${LIVE_CALLBACK_ROOT:-/var/lib/oxygen-live/callbacks}"
+    "${LIVE_CALLBACK_ROOT:-/var/lib/oxygen-live/callbacks}" \
+    "${ANALYTICS_OUTBOX_ROOT:-/var/lib/oxygen-live/analytics-outbox}"
 
 rm -rf public/storage
 ln -s ../storage/app/public public/storage
@@ -24,7 +25,8 @@ chown -R oxygen:oxygen \
     bootstrap/cache \
     "${WORK_DIR:-/tmp/transcoder}" \
     "${LIVE_HLS_ROOT:-/var/lib/oxygen-live/hls}" \
-    "${LIVE_CALLBACK_ROOT:-/var/lib/oxygen-live/callbacks}"
+    "${LIVE_CALLBACK_ROOT:-/var/lib/oxygen-live/callbacks}" \
+    "${ANALYTICS_OUTBOX_ROOT:-/var/lib/oxygen-live/analytics-outbox}"
 
 # APP_KEY must be provided via Dokploy env. Do NOT auto-generate: there is no
 # persisted .env in the image, and a fresh key per boot would make every

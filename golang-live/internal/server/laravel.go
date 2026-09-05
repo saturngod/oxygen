@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,32 @@ import (
 
 	"oxygen/live/internal/config"
 )
+
+type deliveryHTTPError struct {
+	status int
+	body   string
+}
+
+func (e *deliveryHTTPError) Error() string {
+	return fmt.Sprintf("delivery returned %d: %s", e.status, e.body)
+}
+
+func isPermanentDeliveryError(err error) bool {
+	var statusErr *deliveryHTTPError
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+
+	switch statusErr.status {
+	case http.StatusBadRequest,
+		http.StatusRequestEntityTooLarge,
+		http.StatusUnsupportedMediaType,
+		http.StatusUnprocessableEntity:
+		return true
+	default:
+		return false
+	}
+}
 
 type LaravelClient struct {
 	baseURL string
@@ -55,7 +82,8 @@ func (c *LaravelClient) Post(ctx context.Context, path string, payload any, out 
 
 		lastErr = err
 		if !retry {
-			// 4xx (e.g. an explicit auth rejection) is a decision, not a blip.
+			// The durable outbox decides whether a 4xx response is safe to
+			// quarantine or should remain queued for a later deployment/token.
 			return err
 		}
 	}
@@ -92,7 +120,7 @@ func (c *LaravelClient) doPost(ctx context.Context, path string, body []byte, ou
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return false, fmt.Errorf("post %s returned %d: %s", path, resp.StatusCode, string(b))
+		return false, fmt.Errorf("post %s: %w", path, &deliveryHTTPError{status: resp.StatusCode, body: string(b)})
 	}
 
 	if out == nil {

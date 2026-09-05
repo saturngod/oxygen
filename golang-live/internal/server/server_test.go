@@ -15,6 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bluenviron/gohlslib/v2"
+	hlscodecs "github.com/bluenviron/gohlslib/v2/pkg/codecs"
+
 	"oxygen/live/internal/config"
 )
 
@@ -293,6 +296,46 @@ func TestEndRTMPSessionEnqueuesFinalViewerSample(t *testing.T) {
 	}
 }
 
+func TestFailRTMPSessionEnqueuesDurableFailure(t *testing.T) {
+	const sessionID = "0198d846-18e7-7f3c-b91f-ce49f2230ca1"
+	callbackRoot := t.TempDir()
+	srv := New(config.Config{
+		CallbackRoot:      callbackRoot,
+		ViewerTTL:         time.Minute,
+		RollupInterval:    time.Hour,
+		MaxTrackedViewers: 100,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	srv.tracker.StartSession("public-1", sessionID)
+
+	srv.failRTMPSession("public-1", sessionID, errors.New("ffmpeg output stalled"))
+
+	entries, err := os.ReadDir(callbackRoot)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("expected one failure callback, err=%v entries=%d", err, len(entries))
+	}
+	body, err := os.ReadFile(filepath.Join(callbackRoot, entries[0].Name()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope callbackEnvelope
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Path != "/internal/live/session-failed" {
+		t.Fatalf("unexpected callback path %s", envelope.Path)
+	}
+	var payload struct {
+		SessionID    string `json:"session_id"`
+		ErrorMessage string `json:"error_message"`
+	}
+	if err := json.Unmarshal(envelope.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.SessionID != sessionID || payload.ErrorMessage != "ffmpeg output stalled" {
+		t.Fatalf("unexpected failure payload: %+v", payload)
+	}
+}
+
 func TestHLSServingDoesNotTrackUnknownStreams(t *testing.T) {
 	srv := New(config.Config{
 		HLSRoot:           t.TempDir(),
@@ -410,6 +453,134 @@ func TestPublisherReservationIsAtomic(t *testing.T) {
 	}
 }
 
+func TestLiveTranscoderCapacityIsBounded(t *testing.T) {
+	srv := New(config.Config{MaxLiveTranscoders: 1}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	if !srv.reserveTranscoder() {
+		t.Fatal("expected first transcoder reservation to succeed")
+	}
+	if srv.reserveTranscoder() {
+		t.Fatal("expected second transcoder reservation to be rejected")
+	}
+	srv.releaseTranscoder()
+	if !srv.reserveTranscoder() {
+		t.Fatal("expected transcoder reservation after release to succeed")
+	}
+}
+
+func TestLiveSessionCloseWakesPlaylistWaitingForInitialMedia(t *testing.T) {
+	muxer := &gohlslib.Muxer{
+		Variant: gohlslib.MuxerVariantFMP4,
+		Tracks: []*gohlslib.Track{{
+			Codec: &hlscodecs.H264{
+				SPS: []byte{0x67, 0x42, 0x00, 0x1e, 0x95, 0xa8, 0x14, 0x01, 0x6e, 0x9b, 0x80},
+				PPS: []byte{0x68, 0xce, 0x06, 0xe2},
+			},
+			ClockRate: 90000,
+		}},
+	}
+	if err := muxer.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	session := &liveSession{muxer: muxer}
+	handlerDone := make(chan struct{})
+	go func() {
+		req := httptest.NewRequest(http.MethodGet, "/index.m3u8", nil)
+		session.handle(httptest.NewRecorder(), req)
+		close(handlerDone)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	closeDone := make(chan struct{})
+	go func() {
+		session.close()
+		close(closeDone)
+	}()
+
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("session close deadlocked behind playlist request")
+	}
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Fatal("playlist request was not released by muxer close")
+	}
+}
+
+func TestPrepareValidatesProductionDependencies(t *testing.T) {
+	srv := New(config.Config{
+		HLSRoot:        t.TempDir(),
+		CallbackRoot:   t.TempDir(),
+		FFmpegBin:      "true",
+		ServiceToken:   "service-secret",
+		ControlToken:   "control-secret",
+		ViewerTTL:      time.Minute,
+		RollupInterval: time.Minute,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	if err := srv.Prepare(); err != nil {
+		t.Fatalf("expected valid production configuration: %v", err)
+	}
+
+	missingToken := New(config.Config{
+		HLSRoot:      t.TempDir(),
+		CallbackRoot: t.TempDir(),
+		FFmpegBin:    "true",
+		ControlToken: "control-secret",
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := missingToken.Prepare(); err == nil || !strings.Contains(err.Error(), "LIVE_SERVICE_TOKEN") {
+		t.Fatalf("expected missing service token error, got %v", err)
+	}
+
+	missingFFmpeg := New(config.Config{
+		HLSRoot:      t.TempDir(),
+		CallbackRoot: t.TempDir(),
+		FFmpegBin:    "definitely-not-an-oxygen-binary",
+		ServiceToken: "service-secret",
+		ControlToken: "control-secret",
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := missingFFmpeg.Prepare(); err == nil || !strings.Contains(err.Error(), "ffmpeg") {
+		t.Fatalf("expected missing ffmpeg error, got %v", err)
+	}
+
+	partialAnalytics := New(config.Config{
+		HLSRoot:      t.TempDir(),
+		CallbackRoot: t.TempDir(),
+		FFmpegBin:    "true",
+		ServiceToken: "service-secret",
+		ControlToken: "control-secret",
+		AnalyticsURL: "http://analytics.test",
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := partialAnalytics.Prepare(); err == nil || !strings.Contains(err.Error(), "ANALYTICS") {
+		t.Fatalf("expected partial analytics configuration error, got %v", err)
+	}
+}
+
+func TestPrepareFailsOpenWhenOptionalAnalyticsOutboxIsUnavailable(t *testing.T) {
+	blockedParent := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blockedParent, []byte("blocked"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := New(config.Config{
+		HLSRoot:             t.TempDir(),
+		CallbackRoot:        t.TempDir(),
+		FFmpegBin:           "true",
+		ServiceToken:        "service-secret",
+		ControlToken:        "control-secret",
+		AnalyticsURL:        "http://analytics.test",
+		AnalyticsToken:      "analytics-secret",
+		AnalyticsOutboxRoot: filepath.Join(blockedParent, "outbox"),
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	if err := srv.Prepare(); err != nil {
+		t.Fatalf("optional analytics storage must not prevent media startup: %v", err)
+	}
+}
+
 func TestReadinessRequiresRecoveryAndRTMPListener(t *testing.T) {
 	srv := New(config.Config{
 		ViewerTTL:         time.Minute,
@@ -489,5 +660,80 @@ func TestCallbackOutboxRetainsFailedCallbacks(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Fatalf("expected failed callback to remain persisted, got %d entries", len(entries))
+	}
+}
+
+func TestCallbackOutboxQuarantinesPermanentFailure(t *testing.T) {
+	client := NewLaravelClient(config.Config{LaravelURL: "http://laravel.test"})
+	client.http = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusUnprocessableEntity,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("invalid callback")),
+		}, nil
+	})}
+
+	root := t.TempDir()
+	outbox := NewCallbackOutbox(root, client, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := outbox.Enqueue("/internal/live/session-ended", map[string]string{"session_id": "invalid"}); err != nil {
+		t.Fatal(err)
+	}
+	outbox.flush(context.Background())
+
+	deadLetters, err := os.ReadDir(filepath.Join(root, "dead-letter"))
+	if err != nil || len(deadLetters) != 1 {
+		t.Fatalf("expected one dead-letter callback, err=%v entries=%d", err, len(deadLetters))
+	}
+}
+
+func TestCallbackOutboxRetainsAuthenticationFailureForReplay(t *testing.T) {
+	client := NewLaravelClient(config.Config{LaravelURL: "http://laravel.test"})
+	client.http = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("token rotation in progress")),
+		}, nil
+	})}
+
+	root := t.TempDir()
+	outbox := NewCallbackOutbox(root, client, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := outbox.Enqueue("/internal/live/session-ended", map[string]string{"session_id": "session-1"}); err != nil {
+		t.Fatal(err)
+	}
+	outbox.flush(context.Background())
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].IsDir() || !strings.HasSuffix(entries[0].Name(), ".json") {
+		t.Fatalf("expected authentication failure to remain queued, got %+v", entries)
+	}
+}
+
+func TestPermanentDeliveryErrorClassification(t *testing.T) {
+	tests := map[int]bool{
+		http.StatusBadRequest:            true,
+		http.StatusRequestEntityTooLarge: true,
+		http.StatusUnsupportedMediaType:  true,
+		http.StatusUnprocessableEntity:   true,
+		http.StatusUnauthorized:          false,
+		http.StatusForbidden:             false,
+		http.StatusNotFound:              false,
+		http.StatusRequestTimeout:        false,
+		http.StatusConflict:              false,
+		http.StatusTooEarly:              false,
+		http.StatusTooManyRequests:       false,
+		http.StatusServiceUnavailable:    false,
+	}
+
+	for status, expected := range tests {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			actual := isPermanentDeliveryError(&deliveryHTTPError{status: status})
+			if actual != expected {
+				t.Fatalf("status %d: expected permanent=%t, got %t", status, expected, actual)
+			}
+		})
 	}
 }

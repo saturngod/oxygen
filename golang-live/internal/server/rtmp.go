@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bluenviron/gohlslib/v2"
@@ -157,6 +158,10 @@ func (s *Server) handleRTMPConnInner(ctx context.Context, conn net.Conn) error {
 	}
 
 	hlsDir := filepath.Join(s.cfg.HLSRoot, publicID)
+	// A hard process stop can leave a previous run's files behind. Each public ID
+	// has at most one reserved publisher, so it is safe to reset its workspace
+	// before creating the new session.
+	s.cleanupHLSDir(hlsDir)
 	if err := os.MkdirAll(hlsDir, 0o755); err != nil {
 		return fmt.Errorf("create hls dir: %w", err)
 	}
@@ -165,9 +170,26 @@ func (s *Server) handleRTMPConnInner(ctx context.Context, conn net.Conn) error {
 		publicID: publicID,
 		conn:     conn,
 	}
+	directFailure := make(chan error, 1)
+	var directFailureOnce sync.Once
+	reportDirectFailure := func(err error) {
+		if err == nil {
+			return
+		}
+		directFailureOnce.Do(func() {
+			directFailure <- err
+			_ = conn.Close()
+		})
+	}
 
+	var adaptive *adaptiveHLS
 	if len(auth.Stream.Qualities) > 0 {
-		adaptive, err := s.startAdaptiveHLS(ctx, reader, auth.Stream.Qualities, hlsDir, publicID, conn)
+		if !s.reserveTranscoder() {
+			return fmt.Errorf("live transcoder capacity reached")
+		}
+		defer s.releaseTranscoder()
+
+		adaptive, err = s.startAdaptiveHLS(ctx, reader, auth.Stream.Qualities, hlsDir, publicID, conn)
 		if err != nil {
 			return err
 		}
@@ -192,7 +214,7 @@ func (s *Server) handleRTMPConnInner(ctx context.Context, conn net.Conn) error {
 			return fmt.Errorf("start hls muxer: %w", err)
 		}
 		session.muxer = muxer
-		wireRTMPToHLS(reader, trackMap, muxer, s.log, publicID)
+		wireRTMPToHLS(reader, trackMap, muxer, s.log, publicID, reportDirectFailure)
 	}
 
 	// Registered before the session-started callback so the HLS output is always
@@ -243,12 +265,64 @@ func (s *Server) handleRTMPConnInner(ctx context.Context, conn net.Conn) error {
 			s.log.Error("analytics session start could not be persisted", "err", err, "public_id", publicID)
 		}
 	}
-	defer s.endRTMPSession(publicID, startResp.SessionID)
+	defer func() {
+		if adaptive != nil {
+			if failure := adaptive.currentFailure(); failure != nil {
+				s.failRTMPSession(publicID, startResp.SessionID, failure)
+				return
+			}
+		}
+		select {
+		case failure := <-directFailure:
+			s.failRTMPSession(publicID, startResp.SessionID, failure)
+			return
+		default:
+		}
+		s.endRTMPSession(publicID, startResp.SessionID)
+	}()
 
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		if err := reader.Read(); err != nil {
 			return err
+		}
+	}
+}
+
+func (s *Server) failRTMPSession(publicID, sessionID string, failure error) {
+	endedAt := time.Now().UTC()
+	snapshot := s.tracker.PrepareEndSessionSnapshot(publicID, endedAt)
+	if snapshot.SessionID == "" {
+		snapshot.SessionID = sessionID
+	}
+
+	if s.analyticsOutbox != nil && snapshot.OrganizationID != "" && snapshot.LiveStreamID != "" && snapshot.SessionID != "" {
+		event := analyticsEventFromSnapshot(snapshot, AnalyticsSessionFailed, endedAt, &endedAt)
+		event.Status = "failed"
+		if err := s.analyticsOutbox.Enqueue(AnalyticsEventBatch{Events: []AnalyticsEvent{event}}); err != nil {
+			s.log.Error("analytics session failure could not be persisted", "err", err, "public_id", publicID)
+		}
+	}
+	s.tracker.EndSession(publicID)
+
+	message := failure.Error()
+	if len(message) > 2000 {
+		message = message[:2000]
+	}
+	payload := map[string]any{
+		"public_id":     publicID,
+		"session_id":    snapshot.SessionID,
+		"error_message": message,
+	}
+
+	if err := s.outbox.Enqueue("/internal/live/session-failed", payload); err != nil {
+		s.outboxHealthy.Store(false)
+		s.log.Error("session failure callback could not be persisted", "err", err, "public_id", publicID)
+
+		fallbackCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if postErr := s.laravel.Post(fallbackCtx, "/internal/live/session-failed", payload, nil); postErr != nil {
+			s.log.Error("session failure callback fallback failed", "err", postErr, "public_id", publicID)
 		}
 	}
 }
@@ -392,6 +466,7 @@ func wireRTMPToHLS(
 	muxer *gohlslib.Muxer,
 	log logger,
 	publicID string,
+	reportFailure func(error),
 ) {
 	for _, rtmpTrack := range reader.Tracks() {
 		hlsTrack := trackMap[rtmpTrack]
@@ -403,6 +478,7 @@ func wireRTMPToHLS(
 				au = withH264ParameterSets(au, sps, pps)
 				if err := muxer.WriteH264(hlsTrack, time.Now(), toClock(pts, hlsTrack.ClockRate), au); err != nil {
 					log.Warn("write h264 failed", "err", err, "public_id", publicID)
+					reportFailure(fmt.Errorf("write HLS h264: %w", err))
 				}
 			})
 
@@ -412,6 +488,7 @@ func wireRTMPToHLS(
 				au = withH265ParameterSets(au, vps, sps, pps)
 				if err := muxer.WriteH265(hlsTrack, time.Now(), toClock(pts, hlsTrack.ClockRate), au); err != nil {
 					log.Warn("write h265 failed", "err", err, "public_id", publicID)
+					reportFailure(fmt.Errorf("write HLS h265: %w", err))
 				}
 			})
 
@@ -419,6 +496,7 @@ func wireRTMPToHLS(
 			reader.OnDataMPEG4Audio(rtmpTrack, func(pts time.Duration, au []byte) {
 				if err := muxer.WriteMPEG4Audio(hlsTrack, time.Now(), toClock(pts, hlsTrack.ClockRate), [][]byte{au}); err != nil {
 					log.Warn("write aac failed", "err", err, "public_id", publicID)
+					reportFailure(fmt.Errorf("write HLS aac: %w", err))
 				}
 			})
 
@@ -426,6 +504,7 @@ func wireRTMPToHLS(
 			reader.OnDataOpus(rtmpTrack, func(pts time.Duration, packet []byte) {
 				if err := muxer.WriteOpus(hlsTrack, time.Now(), toClock(pts, hlsTrack.ClockRate), [][]byte{packet}); err != nil {
 					log.Warn("write opus failed", "err", err, "public_id", publicID)
+					reportFailure(fmt.Errorf("write HLS opus: %w", err))
 				}
 			})
 		}
@@ -536,5 +615,5 @@ type logger interface {
 }
 
 func toClock(pts time.Duration, clockRate int) int64 {
-	return int64(pts) * int64(clockRate) / int64(time.Second)
+	return int64(pts/time.Second)*int64(clockRate) + int64(pts%time.Second)*int64(clockRate)/int64(time.Second)
 }
