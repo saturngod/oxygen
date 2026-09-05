@@ -64,6 +64,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
             ->scopeBindings()
             ->name('admin.organizations.live-streams.viewer');
         Route::put('live-streams/{liveStream}', [OrganizationLiveStreamsController::class, 'update'])->name('admin.organizations.live-streams.update');
+        Route::delete('live-streams/{liveStream}', [OrganizationLiveStreamsController::class, 'destroy'])->name('admin.organizations.live-streams.destroy');
         Route::post('live-streams/{liveStream}/rotate-key', [OrganizationLiveStreamsController::class, 'rotateKey'])->name('admin.organizations.live-streams.rotate-key');
         Route::post('live-streams/{liveStream}/restart', [OrganizationLiveStreamsController::class, 'restart'])->name('admin.organizations.live-streams.restart');
         Route::post('live-streams/{liveStream}/disable', [OrganizationLiveStreamsController::class, 'disable'])->name('admin.organizations.live-streams.disable');

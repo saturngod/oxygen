@@ -237,6 +237,26 @@ class OrganizationLiveStreamsController extends Controller
             ->with('toast', ['type' => 'success', 'message' => __('Live stream disabled.')]);
     }
 
+    public function destroy(
+        Organization $organization,
+        LiveStream $liveStream,
+        LiveStreamControlClient $client,
+    ): RedirectResponse {
+        $this->authorize('manage', $organization);
+        abort_unless($liveStream->organization_id === $organization->id, 404);
+
+        // Like disable, always ask the media service to disconnect a publisher
+        // that may still be connecting; late session callbacks for the deleted
+        // stream simply resolve to 404 on the service side.
+        $client->restart($liveStream);
+
+        // Sessions and viewer rollups cascade via foreign keys.
+        $liveStream->delete();
+
+        return to_route('admin.organizations.live-streams.index', $organization)
+            ->with('toast', ['type' => 'success', 'message' => __('Live stream deleted.')]);
+    }
+
     /**
      * @return array{id: string, name: string}
      */

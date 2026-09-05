@@ -1,4 +1,11 @@
-import { Form, Head, Link, setLayoutProps, usePoll } from '@inertiajs/react';
+import {
+    Form,
+    Head,
+    Link,
+    router,
+    setLayoutProps,
+    usePoll,
+} from '@inertiajs/react';
 import {
     ChartNoAxesCombined,
     Copy,
@@ -9,6 +16,7 @@ import {
     RotateCcw,
     Settings,
     ShieldOff,
+    Trash2,
     Video,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -19,6 +27,15 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import {
+    Dialog,
+    DialogClose,
+    DialogContent,
+    DialogDescription,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
+} from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
@@ -496,6 +513,8 @@ export default function ShowLiveStream({ organization, liveStream }: Props) {
 
     const publishName = `${liveStream.stream_path}?key=${liveStream.stream_key}`;
     const session = liveStream.current_session;
+    const [confirmingDelete, setConfirmingDelete] = useState(false);
+    const [deleting, setDeleting] = useState(false);
 
     const stats = useMemo(
         () => [
@@ -747,6 +766,15 @@ export default function ShowLiveStream({ organization, liveStream }: Props) {
                                     </Button>
                                 )}
                             </Form>
+
+                            <Button
+                                variant="destructive"
+                                className="w-full"
+                                onClick={() => setConfirmingDelete(true)}
+                            >
+                                <Trash2 className="size-3.5" />
+                                Delete stream
+                            </Button>
                         </div>
                     </div>
                 </div>
@@ -800,6 +828,61 @@ export default function ShowLiveStream({ organization, liveStream }: Props) {
                     <span>Settings version {liveStream.settings_version}</span>
                 </div>
             </div>
+
+            <Dialog
+                open={confirmingDelete}
+                onOpenChange={(open) => {
+                    if (!open) {
+                        setConfirmingDelete(false);
+                        setDeleting(false);
+                    }
+                }}
+            >
+                <DialogContent>
+                    <DialogHeader>
+                        <DialogTitle>Delete live stream?</DialogTitle>
+                        <DialogDescription>
+                            Permanently delete{' '}
+                            <span className="font-medium text-foreground">
+                                {liveStream.title}
+                            </span>{' '}
+                            along with its session history and viewer analytics.
+                            Any active publisher will be disconnected. This
+                            action cannot be undone.
+                        </DialogDescription>
+                    </DialogHeader>
+                    <DialogFooter>
+                        <DialogClose asChild>
+                            <Button variant="outline" disabled={deleting}>
+                                Cancel
+                            </Button>
+                        </DialogClose>
+                        <Button
+                            variant="destructive"
+                            disabled={deleting}
+                            onClick={() => {
+                                setDeleting(true);
+                                router.delete(
+                                    OrganizationLiveStreamsController.destroy.url(
+                                        {
+                                            organization: organization.id,
+                                            liveStream: liveStream.id,
+                                        },
+                                    ),
+                                    {
+                                        onFinish: () => {
+                                            setDeleting(false);
+                                            setConfirmingDelete(false);
+                                        },
+                                    },
+                                );
+                            }}
+                        >
+                            Delete stream
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
         </>
     );
 }

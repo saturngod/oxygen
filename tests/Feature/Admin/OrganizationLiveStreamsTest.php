@@ -450,6 +450,71 @@ test('disabling an idle live stream disconnects a publisher that may still be st
         && $request->hasHeader('Authorization', 'Bearer control-secret'));
 });
 
+test('admin can delete a live stream with its sessions and viewer rollups', function () {
+    [$user, $organization] = liveStreamAdmin();
+    $liveStream = LiveStream::factory()
+        ->for($organization)
+        ->live()
+        ->create();
+    $session = LiveStreamSession::factory()
+        ->for($liveStream)
+        ->create(['status' => LiveStreamSessionStatus::Live]);
+    $liveStream->forceFill(['active_session_id' => $session->id])->save();
+
+    LiveStreamViewerRollup::factory()->create([
+        'organization_id' => $organization->id,
+        'live_stream_id' => $liveStream->id,
+        'live_stream_session_id' => $session->id,
+        'minute' => now()->startOfMinute(),
+    ]);
+
+    config([
+        'services.live.control_url' => 'http://live-service.test',
+        'services.live.control_token' => 'control-secret',
+    ]);
+
+    Http::fake([
+        'http://live-service.test/streams/'.$liveStream->public_id.'/restart' => Http::response(['ok' => true]),
+    ]);
+
+    $this->actingAs($user)
+        ->delete(route('admin.organizations.live-streams.destroy', [$organization, $liveStream]))
+        ->assertRedirect(route('admin.organizations.live-streams.index', $organization));
+
+    expect(LiveStream::query()->count())->toBe(0)
+        ->and(LiveStreamSession::query()->count())->toBe(0)
+        ->and(LiveStreamViewerRollup::query()->count())->toBe(0);
+
+    Http::assertSentCount(1);
+    Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
+        && $request->url() === 'http://live-service.test/streams/'.$liveStream->public_id.'/restart');
+});
+
+test('deleting a live stream from another organization is not found', function () {
+    [$user, $organization] = liveStreamAdmin();
+    $otherOrganization = Organization::factory()->create();
+    $otherStream = LiveStream::factory()->for($otherOrganization)->create();
+
+    $this->actingAs($user)
+        ->delete(route('admin.organizations.live-streams.destroy', [$organization, $otherStream]))
+        ->assertNotFound();
+
+    expect($otherStream->exists())->toBeTrue();
+});
+
+test('operator cannot delete a live stream', function () {
+    $user = User::factory()->create(['email_verified_at' => now()]);
+    $organization = Organization::factory()->create();
+    $organization->users()->attach($user, ['role' => OrganizationRole::Operator->value]);
+    $liveStream = LiveStream::factory()->for($organization)->create();
+
+    $this->actingAs($user)
+        ->delete(route('admin.organizations.live-streams.destroy', [$organization, $liveStream]))
+        ->assertForbidden();
+
+    expect($liveStream->exists())->toBeTrue();
+});
+
 test('restarting an idle live stream disconnects a publisher that may still be starting', function () {
     [$user, $organization] = liveStreamAdmin();
     $liveStream = LiveStream::factory()
