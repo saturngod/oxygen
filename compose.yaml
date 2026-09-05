@@ -25,6 +25,8 @@ services:
         condition: service_healthy
       my-redis:
         condition: service_healthy
+      analytics-postgres:
+        condition: service_healthy
     restart: unless-stopped
     stop_grace_period: 24h
 
@@ -43,21 +45,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-    restart: unless-stopped
-
-  analytics-api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: analytics-runtime
-    env_file:
-      - path: docker/local.env
-        required: true
-    networks:
-      - oxygen-network
-    depends_on:
-      analytics-postgres:
-        condition: service_healthy
     restart: unless-stopped
 
   stream-postgres:

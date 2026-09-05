@@ -9,6 +9,7 @@
 #   - Laravel scheduler             (daily rollup prune, etc.)
 #   - golang-queue VOD worker       (ffmpeg → HLS → S3)
 #   - golang-live service           :8081 (HTTP/HLS) + :1935 (RTMP ingest)
+#   - golang-analytics API          127.0.0.1:8090 (container-internal only)
 #
 # Durable application state lives in Postgres, Redis, S3, and the explicitly
 # mounted public-upload/live-callback volumes described below.
@@ -74,7 +75,7 @@ COPY golang-analytics ./golang-analytics
 RUN cd golang-analytics && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/oxygen-analytics ./cmd/analytics
 
 
-# ── Stage 5: analytics-only runtime image ────────────────────
+# ── Stage 5: optional analytics-only runtime image ────────────────────
 FROM debian:bookworm-slim AS analytics-runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -136,6 +137,7 @@ COPY --chown=oxygen:oxygen --from=assets /app/public/build ./public/build
 # Go service binaries.
 COPY --from=go-build /out/oxygen-queue /usr/local/bin/oxygen-queue
 COPY --from=go-build /out/oxygen-live /usr/local/bin/oxygen-live
+COPY --from=go-build /out/oxygen-analytics /usr/local/bin/oxygen-analytics
 
 # Production PHP config + opcache tuning.
 COPY docker/php.ini "$PHP_INI_DIR/conf.d/zz-oxygen.ini"
@@ -151,7 +153,10 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/healthcheck.sh
 ENV WORK_DIR=/tmp/transcoder \
     LIVE_HLS_ROOT=/var/lib/oxygen-live/hls \
     LIVE_CALLBACK_ROOT=/var/lib/oxygen-live/callbacks \
-    ANALYTICS_OUTBOX_ROOT=/var/lib/oxygen-live/analytics-outbox
+    ANALYTICS_OUTBOX_ROOT=/var/lib/oxygen-live/analytics-outbox \
+    ANALYTICS_ADDR=127.0.0.1:8090 \
+    ANALYTICS_URL=http://127.0.0.1:8090 \
+    ANALYTICS_MIGRATIONS_PATH=/app/golang-analytics/migrations
 
 RUN mkdir -p \
         storage/app/public \
@@ -178,8 +183,8 @@ VOLUME ["/app/storage/app/public", "/var/lib/oxygen-live/callbacks", "/var/lib/o
 # Ports: 8000 web/Octane, 8081 live HTTP/HLS, 1935 RTMP ingest.
 EXPOSE 8000 8081 1935
 
-# Require every supervised process plus Laravel and the live service readiness
-# endpoint. This lets Dokploy reject a release where a background process is
+# Require every supervised process plus Laravel, live, and analytics readiness
+# endpoints. This lets Dokploy reject a release where a background process is
 # crash-looping even though Octane still answers requests.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD ["/usr/local/bin/healthcheck.sh"]
