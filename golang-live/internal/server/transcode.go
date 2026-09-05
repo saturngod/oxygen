@@ -159,7 +159,24 @@ func (s *Server) startAdaptiveHLS(
 		return nil, fmt.Errorf("initialize ffmpeg relay writer: %w", err)
 	}
 
-	wireRTMPToWriter(reader, writer, s.log, publicID, relayConn, s.cfg.FFmpegWriteTimeout, output.reportFailure)
+	stats := &relayStats{}
+	logDiagnostics := func() {
+		latest, found := latestAdaptiveSegment(hlsDir)
+		s.log.Info("adaptive live media diagnostics", append(stats.snapshot(), "public_id", publicID, "segment_found", found, "latest_segment_at", latest)...)
+	}
+	wireRTMPToWriter(reader, writer, s.log, publicID, relayConn, s.cfg.FFmpegWriteTimeout, output.reportFailure, stats)
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-ticker.C:
+				logDiagnostics()
+			}
+		}
+	}()
 	go watchAdaptiveHLS(runCtx, output, hlsDir, s.cfg.FFmpegStallTimeout)
 	s.log.Info("adaptive live transcoder started", "public_id", publicID, "qualities", qualities)
 
@@ -174,7 +191,7 @@ func buildLiveFFmpegArgs(
 	videoCodec string,
 	mediaPrefix string,
 ) []string {
-	args := []string{"-hide_banner", "-loglevel", "warning", "-y", "-i", inputURL}
+	args := []string{"-hide_banner", "-loglevel", "info", "-nostats", "-y", "-i", inputURL}
 
 	filterParts := make([]string, 0, len(renditions)+1)
 	if len(renditions) == 1 {
@@ -268,6 +285,7 @@ func wireRTMPToWriter(
 	relayConn net.Conn,
 	writeTimeout time.Duration,
 	reportFailure func(error),
+	stats *relayStats,
 ) {
 	var writerMu sync.Mutex
 
@@ -278,6 +296,11 @@ func wireRTMPToWriter(
 			err = callback()
 		}
 		writerMu.Unlock()
+		if err == nil {
+			stats.mu.Lock()
+			stats.forwarded++
+			stats.mu.Unlock()
+		}
 		if err != nil {
 			log.Warn("ffmpeg relay write failed", "err", err, "public_id", publicID)
 			reportFailure(fmt.Errorf("ffmpeg relay write failed: %w", err))
@@ -289,6 +312,7 @@ func wireRTMPToWriter(
 		case *rtmpcodecs.H264:
 			filter := h264RelayFilter{sps: codec.SPS, pps: codec.PPS}
 			reader.OnDataH264(track, func(pts time.Duration, dts time.Duration, au [][]byte) {
+				stats.record("video", dts)
 				au = filter.process(au)
 				if au == nil {
 					return
@@ -297,14 +321,17 @@ func wireRTMPToWriter(
 			})
 		case *rtmpcodecs.H265:
 			reader.OnDataH265(track, func(pts time.Duration, dts time.Duration, au [][]byte) {
+				stats.record("video", dts)
 				write(func() error { return writer.WriteH265(track, pts, dts, au) })
 			})
 		case *rtmpcodecs.MPEG4Audio:
 			reader.OnDataMPEG4Audio(track, func(pts time.Duration, accessUnit []byte) {
+				stats.record("audio", pts)
 				write(func() error { return writer.WriteMPEG4Audio(track, pts, accessUnit) })
 			})
 		case *rtmpcodecs.Opus:
 			reader.OnDataOpus(track, func(pts time.Duration, packet []byte) {
+				stats.record("audio", pts)
 				write(func() error { return writer.WriteOpus(track, pts, packet) })
 			})
 		}
