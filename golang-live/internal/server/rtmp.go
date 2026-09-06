@@ -154,10 +154,7 @@ func (s *Server) handleRTMPConnInner(ctx context.Context, conn net.Conn) error {
 	defer s.releasePublisher(publicID)
 	startupStartedAt := time.Now()
 	segmentDurationSeconds := normalizedLiveSegmentDurationSeconds(auth.Stream.LiveSegmentDurationSeconds)
-	startupTimeout := s.cfg.HLSStartupTimeout
-	if len(auth.Stream.Qualities) > 0 {
-		startupTimeout = adaptiveHLSTimeout(startupTimeout, segmentDurationSeconds)
-	}
+	startupTimeout := liveHLSTimeout(s.cfg.HLSStartupTimeout, segmentDurationSeconds)
 	startupCtx, cancelStartup := context.WithTimeout(ctx, startupTimeout)
 	defer cancelStartup()
 
@@ -214,10 +211,11 @@ func (s *Server) handleRTMPConnInner(ctx context.Context, conn net.Conn) error {
 
 		// Legacy streams without an encoding profile retain source-quality remuxing.
 		muxer := &gohlslib.Muxer{
-			Variant:      gohlslib.MuxerVariantFMP4,
-			SegmentCount: 8,
-			Tracks:       hlsTracks,
-			Directory:    hlsDir,
+			Variant:            gohlslib.MuxerVariantFMP4,
+			SegmentCount:       livePlaylistSegmentCount(segmentDurationSeconds),
+			SegmentMinDuration: time.Duration(segmentDurationSeconds) * time.Second,
+			Tracks:             hlsTracks,
+			Directory:          hlsDir,
 			OnEncodeError: func(err error) {
 				s.log.Warn("hls encode error", "err", err, "public_id", publicID)
 			},
@@ -275,7 +273,7 @@ func (s *Server) handleRTMPConnInner(ctx context.Context, conn net.Conn) error {
 	}
 	s.log.Info("hls output ready", append(stats.snapshot(), "public_id", publicID, "elapsed", time.Since(startupStartedAt), "renditions", renditionReadiness)...)
 	if adaptive != nil {
-		adaptive.startWatchdog(ctx, hlsDir, adaptiveHLSTimeout(s.cfg.FFmpegStallTimeout, segmentDurationSeconds))
+		adaptive.startWatchdog(ctx, hlsDir, liveHLSTimeout(s.cfg.FFmpegStallTimeout, segmentDurationSeconds))
 	}
 
 	var startResp SessionStartedResponse

@@ -40,7 +40,7 @@ func TestBuildLiveFFmpegArgsCreatesAdaptiveMasterPlaylist(t *testing.T) {
 	assertContains(t, joined, "[v1]scale=w=1280:h=720[vout1]")
 	assertContains(t, joined, "-var_stream_map v:0,a:0 v:1,a:1")
 	assertContains(t, joined, "-master_pl_name index.m3u8")
-	assertContains(t, joined, "-hls_list_size 8")
+	assertContains(t, joined, "-hls_list_size 18")
 	assertContains(t, joined, "-hls_delete_threshold 5")
 	assertContains(t, joined, "-hls_fmp4_init_filename run-a1b2_init_%v.mp4")
 	assertContains(t, joined, "run-a1b2_segment_%09d.m4s")
@@ -67,10 +67,30 @@ func TestBuildLiveFFmpegArgsDefaultsMissingSegmentDuration(t *testing.T) {
 	), " ")
 
 	assertContains(t, joined, "-hls_time 2")
+	assertContains(t, joined, "-hls_list_size 60")
 	assertContains(t, joined, "-force_key_frames:v:0 expr:gte(t,n_forced*2)")
 }
 
-func TestAdaptiveHLSTimeoutUsesSegmentDurationMinimum(t *testing.T) {
+func TestLivePlaylistSegmentCountRetainsApproximatelyTwoMinutes(t *testing.T) {
+	tests := map[int]int{
+		0:  60,
+		1:  120,
+		2:  60,
+		6:  20,
+		7:  18,
+		10: 12,
+		30: 4,
+		31: 60,
+	}
+
+	for segmentDurationSeconds, expected := range tests {
+		if got := livePlaylistSegmentCount(segmentDurationSeconds); got != expected {
+			t.Fatalf("segment duration %d produced playlist size %d, want %d", segmentDurationSeconds, got, expected)
+		}
+	}
+}
+
+func TestLiveHLSTimeoutUsesSegmentDurationMinimum(t *testing.T) {
 	render360p, _ := quality.Get("360p")
 	joined := strings.Join(buildLiveFFmpegArgs(
 		"rtmp://127.0.0.1:1234/live/source",
@@ -86,10 +106,10 @@ func TestAdaptiveHLSTimeoutUsesSegmentDurationMinimum(t *testing.T) {
 	assertContains(t, joined, "-hls_time 30")
 	assertContains(t, joined, "-force_key_frames:v:0 expr:gte(t,n_forced*30)")
 
-	if got := adaptiveHLSTimeout(30*time.Second, 30); got != 100*time.Second {
-		t.Fatalf("adaptive timeout = %s, want 1m40s", got)
+	if got := liveHLSTimeout(30*time.Second, 30); got != 100*time.Second {
+		t.Fatalf("live HLS timeout = %s, want 1m40s", got)
 	}
-	if got := adaptiveHLSTimeout(2*time.Minute, 30); got != 2*time.Minute {
+	if got := liveHLSTimeout(2*time.Minute, 30); got != 2*time.Minute {
 		t.Fatalf("configured timeout was not preserved: %s", got)
 	}
 }

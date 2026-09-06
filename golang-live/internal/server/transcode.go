@@ -203,6 +203,7 @@ func buildLiveFFmpegArgs(
 ) []string {
 	segmentDurationSeconds = normalizedLiveSegmentDurationSeconds(segmentDurationSeconds)
 	segmentDuration := strconv.Itoa(segmentDurationSeconds)
+	playlistSegmentCount := strconv.Itoa(livePlaylistSegmentCount(segmentDurationSeconds))
 	args := []string{"-hide_banner", "-loglevel", "info", "-nostats", "-y"}
 	if strings.HasPrefix(inputURL, "rtmp://") || strings.HasPrefix(inputURL, "rtmps://") {
 		args = append(args, "-rtmp_live", "live", "-rtmp_buffer", "0")
@@ -269,7 +270,7 @@ func buildLiveFFmpegArgs(
 	args = append(args,
 		"-f", "hls",
 		"-hls_time", segmentDuration,
-		"-hls_list_size", "8",
+		"-hls_list_size", playlistSegmentCount,
 		"-hls_delete_threshold", "5",
 		"-hls_segment_type", "fmp4",
 		"-hls_flags", "delete_segments+independent_segments+temp_file",
@@ -301,12 +302,23 @@ func normalizedLiveSegmentDurationSeconds(segmentDurationSeconds int) int {
 	return segmentDurationSeconds
 }
 
+// Keep approximately two minutes of completed media in each live playlist so
+// downstream HLS consumers can maintain a deeper buffer without increasing the
+// duration (and recovery cost) of individual segments.
+const livePlaylistDurationSeconds = 120
+
+func livePlaylistSegmentCount(segmentDurationSeconds int) int {
+	segmentDurationSeconds = normalizedLiveSegmentDurationSeconds(segmentDurationSeconds)
+
+	return (livePlaylistDurationSeconds + segmentDurationSeconds - 1) / segmentDurationSeconds
+}
+
 // adaptiveMinimumReadySegments gates when an adaptive session may go live.
 // The web player joins with liveSyncDurationCount = 2, i.e. two segments of
 // back-buffer behind the live edge.
 const adaptiveMinimumReadySegments = 2
 
-func adaptiveHLSTimeout(configured time.Duration, segmentDurationSeconds int) time.Duration {
+func liveHLSTimeout(configured time.Duration, segmentDurationSeconds int) time.Duration {
 	minimum := time.Duration(normalizedLiveSegmentDurationSeconds(segmentDurationSeconds)*3+10) * time.Second
 	if configured < minimum {
 		return minimum
