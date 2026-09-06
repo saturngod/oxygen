@@ -450,6 +450,70 @@ test('disabling an idle live stream disconnects a publisher that may still be st
         && $request->hasHeader('Authorization', 'Bearer control-secret'));
 });
 
+test('admin can enable a disabled live stream', function () {
+    [$user, $organization] = liveStreamAdmin();
+    $liveStream = LiveStream::factory()
+        ->for($organization)
+        ->create(['status' => LiveStreamStatus::Disabled]);
+    $session = LiveStreamSession::factory()
+        ->for($liveStream)
+        ->create(['status' => LiveStreamSessionStatus::Live]);
+    $liveStream->forceFill(['active_session_id' => $session->id])->save();
+
+    $this->actingAs($user)
+        ->post(route('admin.organizations.live-streams.enable', [$organization, $liveStream]))
+        ->assertRedirect(route('admin.organizations.live-streams.show', [$organization, $liveStream]));
+
+    $liveStream->refresh();
+
+    expect($liveStream->status)->toBe(LiveStreamStatus::Idle)
+        ->and($liveStream->active_session_id)->toBeNull()
+        ->and($liveStream->restart_required)->toBeFalse();
+});
+
+test('enabling a live stream from another organization is not found', function () {
+    [$user, $organization] = liveStreamAdmin();
+    $otherOrganization = Organization::factory()->create();
+    $otherStream = LiveStream::factory()
+        ->for($otherOrganization)
+        ->create(['status' => LiveStreamStatus::Disabled]);
+
+    $this->actingAs($user)
+        ->post(route('admin.organizations.live-streams.enable', [$organization, $otherStream]))
+        ->assertNotFound();
+
+    expect($otherStream->refresh()->status)->toBe(LiveStreamStatus::Disabled);
+});
+
+test('operator cannot enable a disabled live stream', function () {
+    $user = User::factory()->create(['email_verified_at' => now()]);
+    $organization = Organization::factory()->create();
+    $organization->users()->attach($user, ['role' => OrganizationRole::Operator->value]);
+    $liveStream = LiveStream::factory()
+        ->for($organization)
+        ->create(['status' => LiveStreamStatus::Disabled]);
+
+    $this->actingAs($user)
+        ->post(route('admin.organizations.live-streams.enable', [$organization, $liveStream]))
+        ->assertForbidden();
+
+    expect($liveStream->refresh()->status)->toBe(LiveStreamStatus::Disabled);
+});
+
+test('enabling does not reset a stream that is already active', function () {
+    [$user, $organization] = liveStreamAdmin();
+    $liveStream = LiveStream::factory()
+        ->for($organization)
+        ->live()
+        ->create();
+
+    $this->actingAs($user)
+        ->post(route('admin.organizations.live-streams.enable', [$organization, $liveStream]))
+        ->assertRedirect(route('admin.organizations.live-streams.show', [$organization, $liveStream]));
+
+    expect($liveStream->refresh()->status)->toBe(LiveStreamStatus::Live);
+});
+
 test('admin can delete a live stream with its sessions and viewer rollups', function () {
     [$user, $organization] = liveStreamAdmin();
     $liveStream = LiveStream::factory()

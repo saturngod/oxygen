@@ -237,6 +237,28 @@ class OrganizationLiveStreamsController extends Controller
             ->with('toast', ['type' => 'success', 'message' => __('Live stream disabled.')]);
     }
 
+    public function enable(
+        Organization $organization,
+        LiveStream $liveStream,
+    ): RedirectResponse {
+        $this->authorize('manage', $organization);
+        abort_unless($liveStream->organization_id === $organization->id, 404);
+
+        if ($liveStream->status !== LiveStreamStatus::Disabled) {
+            return to_route('admin.organizations.live-streams.show', [$organization, $liveStream])
+                ->with('toast', ['type' => 'error', 'message' => __('Only a disabled live stream can be enabled.')]);
+        }
+
+        $liveStream->forceFill([
+            'status' => LiveStreamStatus::Idle,
+            'active_session_id' => null,
+            'restart_required' => false,
+        ])->save();
+
+        return to_route('admin.organizations.live-streams.show', [$organization, $liveStream])
+            ->with('toast', ['type' => 'success', 'message' => __('Live stream enabled. It is ready for a publisher.')]);
+    }
+
     public function destroy(
         Organization $organization,
         LiveStream $liveStream,

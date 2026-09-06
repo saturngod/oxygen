@@ -67,6 +67,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
         Route::delete('live-streams/{liveStream}', [OrganizationLiveStreamsController::class, 'destroy'])->name('admin.organizations.live-streams.destroy');
         Route::post('live-streams/{liveStream}/rotate-key', [OrganizationLiveStreamsController::class, 'rotateKey'])->name('admin.organizations.live-streams.rotate-key');
         Route::post('live-streams/{liveStream}/restart', [OrganizationLiveStreamsController::class, 'restart'])->name('admin.organizations.live-streams.restart');
+        Route::post('live-streams/{liveStream}/enable', [OrganizationLiveStreamsController::class, 'enable'])->name('admin.organizations.live-streams.enable');
         Route::post('live-streams/{liveStream}/disable', [OrganizationLiveStreamsController::class, 'disable'])->name('admin.organizations.live-streams.disable');
         Route::get('profiles', [OrganizationProfilesController::class, 'index'])->name('admin.organizations.profiles.index');
         Route::get('profiles/create', [OrganizationProfilesController::class, 'create'])->name('admin.organizations.profiles.create');

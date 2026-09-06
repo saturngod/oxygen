@@ -12,6 +12,7 @@ import {
     Eye,
     KeyRound,
     Link as LinkIcon,
+    Power,
     Radio,
     RotateCcw,
     Settings,
@@ -487,10 +488,9 @@ export default function ShowLiveStream({ organization, liveStream }: Props) {
             ],
         },
         {
-            // Keep polling while the detail page is open so an idle stream can
-            // transition to live and begin receiving viewer rollups without a
-            // manual refresh. Disabled streams cannot transition back to live.
-            autoStart: liveStream.status !== 'disabled',
+            // Keep polling while the detail page is open so enabling a stream
+            // immediately resumes lifecycle and viewer updates.
+            autoStart: true,
             keepAlive: false,
         },
     );
@@ -746,26 +746,49 @@ export default function ShowLiveStream({ organization, liveStream }: Props) {
                                 )}
                             </Form>
 
-                            <Form
-                                {...OrganizationLiveStreamsController.disable.form(
-                                    {
-                                        organization: organization.id,
-                                        liveStream: liveStream.id,
-                                    },
-                                )}
-                                options={{ preserveScroll: true }}
-                            >
-                                {({ processing }) => (
-                                    <Button
-                                        variant="destructive"
-                                        disabled={processing}
-                                        className="w-full"
-                                    >
-                                        <ShieldOff className="size-3.5" />
-                                        Disable stream
-                                    </Button>
-                                )}
-                            </Form>
+                            {liveStream.status === 'disabled' ? (
+                                <Form
+                                    {...OrganizationLiveStreamsController.enable.form(
+                                        {
+                                            organization: organization.id,
+                                            liveStream: liveStream.id,
+                                        },
+                                    )}
+                                    options={{ preserveScroll: true }}
+                                >
+                                    {({ processing }) => (
+                                        <Button
+                                            variant="outline"
+                                            disabled={processing}
+                                            className="w-full"
+                                        >
+                                            <Power data-icon="inline-start" />
+                                            Enable stream
+                                        </Button>
+                                    )}
+                                </Form>
+                            ) : (
+                                <Form
+                                    {...OrganizationLiveStreamsController.disable.form(
+                                        {
+                                            organization: organization.id,
+                                            liveStream: liveStream.id,
+                                        },
+                                    )}
+                                    options={{ preserveScroll: true }}
+                                >
+                                    {({ processing }) => (
+                                        <Button
+                                            variant="destructive"
+                                            disabled={processing}
+                                            className="w-full"
+                                        >
+                                            <ShieldOff data-icon="inline-start" />
+                                            Disable stream
+                                        </Button>
+                                    )}
+                                </Form>
+                            )}
 
                             <Button
                                 variant="destructive"
