@@ -225,9 +225,13 @@ export default function EditProfile({
                             <div className="grid gap-3">
                                 <Label>Video qualities</Label>
                                 <p className="text-xs text-muted-foreground">
-                                    Select one or more output renditions. Each
+                                    Select zero or more output renditions. Each
                                     selected rendition will be generated when a
-                                    video is encoded with this profile.
+                                    video is encoded with this profile. Leave
+                                    empty for live passthrough: the live service
+                                    forwards the source stream without
+                                    transcoding. Passthrough profiles cannot be
+                                    used for uploads.
                                 </p>
 
                                 {selected.map((value) => (
@@ -305,13 +309,17 @@ export default function EditProfile({
 
                             <div className="flex items-center gap-4">
                                 <Button
-                                    disabled={
-                                        processing || selected.length === 0
-                                    }
+                                    disabled={processing}
                                     data-test="update-profile-button"
                                 >
                                     Save changes
                                 </Button>
+                                {selected.length === 0 && (
+                                    <span className="text-xs text-muted-foreground">
+                                        No qualities selected — this will be a
+                                        live passthrough profile.
+                                    </span>
+                                )}
                             </div>
                         </>
                     )}

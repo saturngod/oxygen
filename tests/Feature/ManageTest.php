@@ -538,3 +538,41 @@ test('manage endpoints require an active organization', function () {
         ->get('/manage')
         ->assertForbidden();
 });
+
+test('url import rejects live passthrough profile', function () {
+    [$user, $org] = manageActor();
+    $passthrough = Profile::factory()->for($org)->create([
+        'name' => 'Live Passthrough',
+        'qualities' => [],
+    ]);
+
+    $this->actingAs($user)
+        ->withSession(['current_organization_id' => $org->getKey()])
+        ->post('/manage/files/url', [
+            'title' => 'Remote clip',
+            'source_url' => 'https://cdn.example.com/videos/promo.mp4',
+            'profile_id' => $passthrough->id,
+        ])
+        ->assertStatus(422);
+
+    expect(MediaFile::query()->count())->toBe(0);
+});
+
+test('init multipart upload rejects live passthrough profile', function () {
+    [$user, $org] = manageActor();
+    $passthrough = Profile::factory()->for($org)->create([
+        'name' => 'Live Passthrough',
+        'qualities' => [],
+    ]);
+
+    $this->mock(S3MultipartUploadManager::class)
+        ->shouldNotReceive('initiate');
+
+    $this->actingAs($user)
+        ->withSession(['current_organization_id' => $org->getKey()])
+        ->postJson('/manage/files/multipart/init', [
+            'file_name' => 'promo.mp4',
+            'profile_id' => $passthrough->id,
+        ])
+        ->assertStatus(422);
+});

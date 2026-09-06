@@ -153,15 +153,21 @@ export default function OrganizationProfiles({
                                     </TableCell>
                                     <TableCell>
                                         <div className="flex flex-wrap gap-1">
-                                            {profile.qualities.map(
-                                                (quality) => (
-                                                    <Badge
-                                                        key={quality}
-                                                        variant="secondary"
-                                                    >
-                                                        {quality}
-                                                    </Badge>
-                                                ),
+                                            {profile.qualities.length === 0 ? (
+                                                <Badge variant="outline">
+                                                    Passthrough
+                                                </Badge>
+                                            ) : (
+                                                profile.qualities.map(
+                                                    (quality) => (
+                                                        <Badge
+                                                            key={quality}
+                                                            variant="secondary"
+                                                        >
+                                                            {quality}
+                                                        </Badge>
+                                                    ),
+                                                )
                                             )}
                                         </div>
                                     </TableCell>

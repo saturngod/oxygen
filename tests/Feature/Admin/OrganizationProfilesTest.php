@@ -90,24 +90,45 @@ test('admin can create a profile with selected qualities', function () {
         ->and($profile->live_segment_duration_seconds)->toBe(3);
 });
 
-test('profile requires at least one quality', function () {
+test('admin can create a live passthrough profile with empty qualities', function () {
     $user = User::factory()->create(['email_verified_at' => now()]);
     $org = Organization::factory()->create();
 
     $org->users()->attach($user, ['role' => OrganizationRole::Admin->value]);
 
     $this->actingAs($user)
-        ->from(route('admin.organizations.profiles.create', $org))
         ->post(route('admin.organizations.profiles.store', $org), [
-            'name' => 'Empty Profile',
+            'name' => 'Live Passthrough',
             'qualities' => [],
             'generate_thumbnail' => false,
             'video_segment_duration_seconds' => 6,
             'live_segment_duration_seconds' => 2,
         ])
-        ->assertSessionHasErrors('qualities');
+        ->assertRedirect(route('admin.organizations.profiles.index', $org));
 
-    expect(Profile::query()->count())->toBe(0);
+    $profile = Profile::query()->where('organization_id', $org->id)->sole();
+
+    expect($profile->name)->toBe('Live Passthrough')
+        ->and($profile->qualities)->toBe([]);
+});
+
+test('profile store treats a missing qualities key as passthrough', function () {
+    $user = User::factory()->create(['email_verified_at' => now()]);
+    $org = Organization::factory()->create();
+
+    $org->users()->attach($user, ['role' => OrganizationRole::Admin->value]);
+
+    // Browsers submit no qualities key at all when nothing is checked.
+    $this->actingAs($user)
+        ->post(route('admin.organizations.profiles.store', $org), [
+            'name' => 'Live Passthrough',
+            'generate_thumbnail' => false,
+            'video_segment_duration_seconds' => 6,
+            'live_segment_duration_seconds' => 2,
+        ])
+        ->assertRedirect(route('admin.organizations.profiles.index', $org));
+
+    expect(Profile::query()->where('organization_id', $org->id)->sole()->qualities)->toBe([]);
 });
 
 test('profile rejects unknown quality values', function () {
@@ -358,6 +379,54 @@ test('admin can update a profile name and qualities', function () {
         ->and($profile->generate_thumbnail)->toBeTrue()
         ->and($profile->video_segment_duration_seconds)->toBe(10)
         ->and($profile->live_segment_duration_seconds)->toBe(4);
+});
+
+test('admin can update a profile to live passthrough with empty qualities', function () {
+    $user = User::factory()->create(['email_verified_at' => now()]);
+    $org = Organization::factory()->create();
+
+    $org->users()->attach($user, ['role' => OrganizationRole::Admin->value]);
+
+    $profile = Profile::factory()->for($org)->create([
+        'name' => 'Standard',
+        'qualities' => [VideoQuality::Hd720p->value],
+    ]);
+
+    $this->actingAs($user)
+        ->put(route('admin.organizations.profiles.update', [$org, $profile]), [
+            'name' => 'Standard',
+            'qualities' => [],
+            'generate_thumbnail' => false,
+            'video_segment_duration_seconds' => 6,
+            'live_segment_duration_seconds' => 2,
+        ])
+        ->assertRedirect(route('admin.organizations.profiles.index', $org));
+
+    expect($profile->refresh()->qualities)->toBe([]);
+});
+
+test('profile update treats a missing qualities key as passthrough', function () {
+    $user = User::factory()->create(['email_verified_at' => now()]);
+    $org = Organization::factory()->create();
+
+    $org->users()->attach($user, ['role' => OrganizationRole::Admin->value]);
+
+    $profile = Profile::factory()->for($org)->create([
+        'name' => 'Standard',
+        'qualities' => [VideoQuality::Hd720p->value],
+    ]);
+
+    // Browsers submit no qualities key at all when nothing is checked.
+    $this->actingAs($user)
+        ->put(route('admin.organizations.profiles.update', [$org, $profile]), [
+            'name' => 'Standard',
+            'generate_thumbnail' => false,
+            'video_segment_duration_seconds' => 6,
+            'live_segment_duration_seconds' => 2,
+        ])
+        ->assertRedirect(route('admin.organizations.profiles.index', $org));
+
+    expect($profile->refresh()->qualities)->toBe([]);
 });
 
 test('update is scoped to the organization', function () {

@@ -159,9 +159,12 @@ export default function Manage({
     filters,
     availableTags,
 }: Props) {
+    const vodProfiles = profiles.filter(
+        (profile) => profile.qualities.length > 0,
+    );
     const defaultProfileId =
-        profiles.find((profile) => profile.is_default)?.id ??
-        profiles[0]?.id ??
+        vodProfiles.find((profile) => profile.is_default)?.id ??
+        vodProfiles[0]?.id ??
         '';
 
     const [folderDialogOpen, setFolderDialogOpen] = useState(false);
@@ -180,7 +183,7 @@ export default function Manage({
         {},
     );
     const fileInputRef = useRef<HTMLInputElement>(null);
-    const hasProfiles = profiles.length > 0;
+    const hasProfiles = vodProfiles.length > 0;
 
     const [searchValue, setSearchValue] = useState(filters.search ?? '');
     const [activeTag, setActiveTag] = useState(filters.tag ?? null);
@@ -777,7 +780,7 @@ export default function Manage({
                                                         <SelectValue placeholder="Select a profile" />
                                                     </SelectTrigger>
                                                     <SelectContent>
-                                                        {profiles.map(
+                                                        {vodProfiles.map(
                                                             (profile) => (
                                                                 <SelectItem
                                                                     key={
@@ -1112,7 +1115,7 @@ export default function Manage({
                                                                 <SelectValue placeholder="Select a profile" />
                                                             </SelectTrigger>
                                                             <SelectContent>
-                                                                {profiles.map(
+                                                                {vodProfiles.map(
                                                                     (
                                                                         profile,
                                                                     ) => (

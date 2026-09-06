@@ -108,9 +108,12 @@ export default function CreateLiveStream({ organization, profiles }: Props) {
                                                 >
                                                     <span>{profile.name}</span>
                                                     <span className="ml-2 text-xs text-muted-foreground">
-                                                        {profile.qualities.join(
-                                                            ' · ',
-                                                        )}
+                                                        {profile.qualities
+                                                            .length === 0
+                                                            ? 'Passthrough · live direct'
+                                                            : profile.qualities.join(
+                                                                  ' · ',
+                                                              )}
                                                     </span>
                                                 </SelectItem>
                                             ))}
@@ -137,6 +140,8 @@ export default function CreateLiveStream({ organization, profiles }: Props) {
                                     The live service generates one HLS rendition
                                     for each quality in this profile and
                                     publishes them through the master playlist.
+                                    A passthrough profile forwards the source
+                                    stream without transcoding.
                                 </p>
                                 <InputError message={errors.profile_id} />
                             </div>

@@ -314,9 +314,15 @@ class ManageController extends Controller
 
     private function resolveProfile(string $organizationId, string $profileId): Profile
     {
-        return Profile::query()
+        $profile = Profile::query()
             ->where('organization_id', $organizationId)
             ->findOr($profileId, fn () => abort(422, 'Selected profile is not available.'));
+
+        // Passthrough profiles (empty qualities) are live-only: the VOD
+        // transcode worker requires at least one rendition.
+        abort_if(empty($profile->qualities), 422, 'Selected profile is for live passthrough and cannot be used for uploads.');
+
+        return $profile;
     }
 
     private function attachProfileSnapshot(MediaFile $mediaFile, Profile $profile): void

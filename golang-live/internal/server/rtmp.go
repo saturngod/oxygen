@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bluenviron/gohlslib/v2"
@@ -604,6 +605,33 @@ func wireRTMPToHLS(
 	reportFailure func(error),
 	stats *relayStats,
 ) {
+	// A single access unit with a timestamp jump (e.g. video clock drifting
+	// behind audio and snapping back) breaks DTS extraction for that unit
+	// only; the extractor recovers on the next normal unit. Killing the whole
+	// session on the first bad unit causes a reconnect loop, so skip isolated
+	// failures and only fail after a sustained run (~1s of media at 30fps).
+	policy := &hlsWriteErrorPolicy{}
+
+	write := func(track string, err error) {
+		if err == nil {
+			policy.noteSuccess()
+
+			return
+		}
+
+		n := policy.noteFailure()
+		if n < maxConsecutiveHLSWriteErrors {
+			log.Warn("skipping HLS write", "track", track, "err", err, "public_id", publicID, "consecutive", n)
+
+			return
+		}
+
+		if n == maxConsecutiveHLSWriteErrors {
+			log.Warn("HLS writes failing repeatedly", "track", track, "err", err, "public_id", publicID, "consecutive", n)
+			reportFailure(fmt.Errorf("write HLS %s failed %d times in a row: %w", track, n, err))
+		}
+	}
+
 	for _, rtmpTrack := range reader.Tracks() {
 		hlsTrack := trackMap[rtmpTrack]
 
@@ -616,10 +644,7 @@ func wireRTMPToHLS(
 					return
 				}
 				stats.recordVideo(dts, h264HasIDR(au))
-				if err := muxer.WriteH264(hlsTrack, time.Now(), toClock(pts, hlsTrack.ClockRate), au); err != nil {
-					log.Warn("write h264 failed", "err", err, "public_id", publicID)
-					reportFailure(fmt.Errorf("write HLS h264: %w", err))
-				}
+				write("h264", muxer.WriteH264(hlsTrack, time.Now(), toClock(pts, hlsTrack.ClockRate), au))
 			})
 
 		case *rtmpcodecs.H265:
@@ -627,31 +652,43 @@ func wireRTMPToHLS(
 			reader.OnDataH265(rtmpTrack, func(pts time.Duration, dts time.Duration, au [][]byte) {
 				stats.recordVideo(dts, h265HasRandomAccess(au))
 				au = withH265ParameterSets(au, vps, sps, pps)
-				if err := muxer.WriteH265(hlsTrack, time.Now(), toClock(pts, hlsTrack.ClockRate), au); err != nil {
-					log.Warn("write h265 failed", "err", err, "public_id", publicID)
-					reportFailure(fmt.Errorf("write HLS h265: %w", err))
-				}
+				write("h265", muxer.WriteH265(hlsTrack, time.Now(), toClock(pts, hlsTrack.ClockRate), au))
 			})
 
 		case *rtmpcodecs.MPEG4Audio:
 			reader.OnDataMPEG4Audio(rtmpTrack, func(pts time.Duration, au []byte) {
 				stats.recordAudio(pts)
-				if err := muxer.WriteMPEG4Audio(hlsTrack, time.Now(), toClock(pts, hlsTrack.ClockRate), [][]byte{au}); err != nil {
-					log.Warn("write aac failed", "err", err, "public_id", publicID)
-					reportFailure(fmt.Errorf("write HLS aac: %w", err))
-				}
+				write("aac", muxer.WriteMPEG4Audio(hlsTrack, time.Now(), toClock(pts, hlsTrack.ClockRate), [][]byte{au}))
 			})
 
 		case *rtmpcodecs.Opus:
 			reader.OnDataOpus(rtmpTrack, func(pts time.Duration, packet []byte) {
 				stats.recordAudio(pts)
-				if err := muxer.WriteOpus(hlsTrack, time.Now(), toClock(pts, hlsTrack.ClockRate), [][]byte{packet}); err != nil {
-					log.Warn("write opus failed", "err", err, "public_id", publicID)
-					reportFailure(fmt.Errorf("write HLS opus: %w", err))
-				}
+				write("opus", muxer.WriteOpus(hlsTrack, time.Now(), toClock(pts, hlsTrack.ClockRate), [][]byte{packet}))
 			})
 		}
 	}
+}
+
+// maxConsecutiveHLSWriteErrors bounds tolerance for transient muxer write
+// errors in the direct (passthrough) path before the session is failed.
+const maxConsecutiveHLSWriteErrors = 30
+
+// hlsWriteErrorPolicy counts consecutive muxer write failures so isolated
+// bad access units are skipped while a sustained failure still ends the
+// session. All methods are safe for concurrent use.
+type hlsWriteErrorPolicy struct {
+	consecutive atomic.Int32
+}
+
+func (p *hlsWriteErrorPolicy) noteSuccess() {
+	p.consecutive.Store(0)
+}
+
+// noteFailure records one failure and returns the current consecutive run
+// length, including this failure.
+func (p *hlsWriteErrorPolicy) noteFailure() int32 {
+	return p.consecutive.Add(1)
 }
 
 // H.264/H.265 NALU types needed to detect key frames and parameter sets.
