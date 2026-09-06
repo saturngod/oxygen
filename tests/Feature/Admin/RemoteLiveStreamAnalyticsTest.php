@@ -68,3 +68,22 @@ test('remote analytics returns an unavailable nullable chart after bounded retri
 
     Http::assertSentCount(3);
 });
+
+test('remote analytics can permanently purge a stream', function () {
+    $organization = Organization::factory()->create();
+    $liveStream = LiveStream::factory()->for($organization)->create();
+
+    config([
+        'services.analytics.url' => 'http://analytics.test',
+        'services.analytics.query_token' => 'private-query-token',
+    ]);
+    Http::fake([
+        'http://analytics.test/*' => Http::response(status: 204),
+    ]);
+
+    expect(app(RemoteLiveStreamAnalytics::class)->purge($liveStream))->toBeTrue();
+
+    Http::assertSent(fn ($request): bool => $request->method() === 'DELETE'
+        && $request->url() === 'http://analytics.test/internal/v1/organizations/'.$organization->id.'/streams/'.$liveStream->id
+        && $request->hasHeader('Authorization', 'Bearer private-query-token'));
+});

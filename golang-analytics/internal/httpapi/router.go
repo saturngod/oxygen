@@ -14,13 +14,14 @@ type RouterDependencies struct {
 	Config    config.Config
 	Events    store.EventStore
 	Analytics *query.Service
+	Purger    store.PurgeStore
 	Ping      func(context.Context) error
 }
 
 func NewRouter(dependencies RouterDependencies) http.Handler {
 	mux := http.NewServeMux()
 	ingest := IngestHandler{events: dependencies.Events, token: dependencies.Config.IngestToken, maxBatch: dependencies.Config.MaximumBatchSize, maxBody: dependencies.Config.MaximumRequestBodyBytes, maxAge: time.Duration(dependencies.Config.RawRetentionDays) * 24 * time.Hour}
-	analytics := AnalyticsHandler{service: dependencies.Analytics, token: dependencies.Config.QueryToken}
+	analytics := AnalyticsHandler{service: dependencies.Analytics, purger: dependencies.Purger, token: dependencies.Config.QueryToken}
 	health := HealthHandler{ping: dependencies.Ping}
 
 	mux.HandleFunc("GET /healthz", health.Health)
@@ -28,6 +29,7 @@ func NewRouter(dependencies RouterDependencies) http.Handler {
 	mux.HandleFunc("POST /internal/v1/events/batch", ingest.Handle)
 	mux.HandleFunc("GET /internal/v1/organizations/{organizationID}/streams/{streamID}/analytics", analytics.Handle)
 	mux.HandleFunc("GET /internal/v1/organizations/{organizationID}/streams/{streamID}/live", analytics.Live)
+	mux.HandleFunc("DELETE /internal/v1/organizations/{organizationID}/streams/{streamID}", analytics.Purge)
 
 	return recoverPanic(mux)
 }

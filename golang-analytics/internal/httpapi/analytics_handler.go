@@ -6,11 +6,33 @@ import (
 	"github.com/google/uuid"
 	"oxygen/analytics/internal/domain"
 	"oxygen/analytics/internal/query"
+	"oxygen/analytics/internal/store"
 )
 
 type AnalyticsHandler struct {
 	service *query.Service
+	purger  store.PurgeStore
 	token   string
+}
+
+func (h AnalyticsHandler) Purge(writer http.ResponseWriter, request *http.Request) {
+	if !hasBearerToken(request, h.token) {
+		writeError(writer, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if h.purger == nil {
+		writeError(writer, http.StatusServiceUnavailable, "analytics purge is unavailable")
+		return
+	}
+	organizationID, streamID, ok := parseEntityIDs(writer, request)
+	if !ok {
+		return
+	}
+	if err := h.purger.PurgeStream(request.Context(), organizationID, streamID); err != nil {
+		writeError(writer, http.StatusServiceUnavailable, "analytics purge failed")
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
 }
 
 func (h AnalyticsHandler) Handle(writer http.ResponseWriter, request *http.Request) {

@@ -20,6 +20,10 @@ type AnalyticsStore interface {
 	LatestEventAt(context.Context, uuid.UUID, uuid.UUID) (*time.Time, error)
 }
 
+type PurgeStore interface {
+	PurgeStream(context.Context, uuid.UUID, uuid.UUID) error
+}
+
 type MaintenanceStore interface {
 	Reconcile(context.Context, time.Time, time.Time) error
 	PruneEvents(context.Context, time.Time) (int64, error)
@@ -28,6 +32,7 @@ type MaintenanceStore interface {
 type Store interface {
 	EventStore
 	AnalyticsStore
+	PurgeStore
 	MaintenanceStore
 	Ping(context.Context) error
 	Close()

@@ -54,8 +54,13 @@ func insertEvent(ctx context.Context, tx pgx.Tx, event domain.Event) (bool, erro
 			occurred_at, current_viewers, interval_peak_viewers, session_peak_viewers,
 			viewer_identity_additions, playlist_requests_delta, segment_requests_delta,
 			unique_viewers_total, playlist_requests_total, segment_requests_total
-		) VALUES (
+		)
+		SELECT
 			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17
+		WHERE NOT EXISTS (
+			SELECT 1
+			FROM deleted_live_streams
+			WHERE organization_id = $5 AND live_stream_id = $6
 		)
 		ON CONFLICT DO NOTHING
 		RETURNING event_id

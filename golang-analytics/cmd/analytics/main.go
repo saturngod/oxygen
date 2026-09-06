@@ -68,7 +68,7 @@ func runServer() error {
 	queryService := query.NewService(analyticsStore)
 	server := &http.Server{
 		Addr:         cfg.Addr,
-		Handler:      httpapi.NewRouter(httpapi.RouterDependencies{Config: cfg, Events: analyticsStore, Analytics: queryService, Ping: analyticsStore.Ping}),
+		Handler:      httpapi.NewRouter(httpapi.RouterDependencies{Config: cfg, Events: analyticsStore, Analytics: queryService, Purger: analyticsStore, Ping: analyticsStore.Ping}),
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
 		IdleTimeout:  cfg.IdleTimeout,

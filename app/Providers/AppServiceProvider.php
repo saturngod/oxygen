@@ -2,6 +2,7 @@
 
 namespace App\Providers;
 
+use App\Contracts\LiveStreamAnalyticsPurger;
 use App\Contracts\LiveStreamAnalyticsReader;
 use App\Services\LiveStreamViewerAnalytics;
 use App\Services\RemoteLiveStreamAnalytics;
@@ -19,6 +20,14 @@ class AppServiceProvider extends ServiceProvider
     public function register(): void
     {
         $this->app->bind(LiveStreamAnalyticsReader::class, function ($app): LiveStreamAnalyticsReader {
+            if (filled(config('services.analytics.url'))) {
+                return $app->make(RemoteLiveStreamAnalytics::class);
+            }
+
+            return $app->make(LiveStreamViewerAnalytics::class);
+        });
+
+        $this->app->bind(LiveStreamAnalyticsPurger::class, function ($app): LiveStreamAnalyticsPurger {
             if (filled(config('services.analytics.url'))) {
                 return $app->make(RemoteLiveStreamAnalytics::class);
             }

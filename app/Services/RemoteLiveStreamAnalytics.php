@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Contracts\LiveStreamAnalyticsPurger;
 use App\Contracts\LiveStreamAnalyticsReader;
 use App\Enums\LiveStreamViewerPeriod;
 use App\Models\LiveStream;
@@ -10,8 +11,15 @@ use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use Throwable;
 
-class RemoteLiveStreamAnalytics implements LiveStreamAnalyticsReader
+class RemoteLiveStreamAnalytics implements LiveStreamAnalyticsPurger, LiveStreamAnalyticsReader
 {
+    public function purge(LiveStream $liveStream): bool
+    {
+        $response = $this->request($liveStream, '', method: 'delete');
+
+        return $response !== null && ($response->successful() || $response->notFound());
+    }
+
     public function build(LiveStream $liveStream, LiveStreamViewerPeriod $period): array
     {
         $response = $this->request($liveStream, '/analytics', [
@@ -73,8 +81,12 @@ class RemoteLiveStreamAnalytics implements LiveStreamAnalyticsReader
         ];
     }
 
-    private function request(LiveStream $liveStream, string $path, array $query = []): ?Response
-    {
+    private function request(
+        LiveStream $liveStream,
+        string $path,
+        array $query = [],
+        string $method = 'get',
+    ): ?Response {
         $baseUrl = rtrim((string) config('services.analytics.url'), '/');
 
         if ($baseUrl === '') {
@@ -87,7 +99,10 @@ class RemoteLiveStreamAnalytics implements LiveStreamAnalyticsReader
 
         for ($attempt = 0; $attempt < 3; $attempt++) {
             try {
-                $response = $this->pendingRequest()->get($url, $query);
+                $request = $this->pendingRequest();
+                $response = $method === 'delete'
+                    ? $request->delete($url)
+                    : $request->get($url, $query);
 
                 if ($response->status() < 500 || $attempt === 2) {
                     return $response;

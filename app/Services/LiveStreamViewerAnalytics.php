@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Contracts\LiveStreamAnalyticsPurger;
 use App\Contracts\LiveStreamAnalyticsReader;
 use App\Enums\LiveStreamViewerPeriod;
 use App\Models\LiveStream;
@@ -10,8 +11,13 @@ use App\Models\LiveStreamViewerRollup;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\Date;
 
-class LiveStreamViewerAnalytics implements LiveStreamAnalyticsReader
+class LiveStreamViewerAnalytics implements LiveStreamAnalyticsPurger, LiveStreamAnalyticsReader
 {
+    public function purge(LiveStream $liveStream): bool
+    {
+        return true;
+    }
+
     /**
      * @return array{
      *     range_label: string,

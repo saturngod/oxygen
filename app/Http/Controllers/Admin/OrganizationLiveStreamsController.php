@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Admin;
 
+use App\Contracts\LiveStreamAnalyticsPurger;
 use App\Contracts\LiveStreamAnalyticsReader;
 use App\Enums\LiveStreamStatus;
 use App\Http\Controllers\Controller;
@@ -263,16 +264,22 @@ class OrganizationLiveStreamsController extends Controller
         Organization $organization,
         LiveStream $liveStream,
         LiveStreamControlClient $client,
+        LiveStreamAnalyticsPurger $analytics,
     ): RedirectResponse {
         $this->authorize('manage', $organization);
         abort_unless($liveStream->organization_id === $organization->id, 404);
+
+        if (! $analytics->purge($liveStream)) {
+            return to_route('admin.organizations.live-streams.show', [$organization, $liveStream])
+                ->with('toast', ['type' => 'error', 'message' => __('Analytics data could not be deleted. The live stream was not deleted.')]);
+        }
 
         // Like disable, always ask the media service to disconnect a publisher
         // that may still be connecting; late session callbacks for the deleted
         // stream simply resolve to 404 on the service side.
         $client->restart($liveStream);
 
-        // Sessions and viewer rollups cascade via foreign keys.
+        // Sessions plus minute and hourly viewer rollups cascade via foreign keys.
         $liveStream->delete();
 
         return to_route('admin.organizations.live-streams.index', $organization)

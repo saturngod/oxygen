@@ -16,12 +16,20 @@ import (
 )
 
 type fakeEventStore struct {
-	events []domain.Event
+	events               []domain.Event
+	purgedOrganizationID uuid.UUID
+	purgedStreamID       uuid.UUID
 }
 
 func (f *fakeEventStore) IngestBatch(_ context.Context, events []domain.Event) (domain.IngestResult, error) {
 	f.events = append(f.events, events...)
 	return domain.IngestResult{Accepted: len(events)}, nil
+}
+
+func (f *fakeEventStore) PurgeStream(_ context.Context, organizationID, streamID uuid.UUID) error {
+	f.purgedOrganizationID = organizationID
+	f.purgedStreamID = streamID
+	return nil
 }
 
 type fakeQueryStore struct{}
@@ -42,7 +50,33 @@ func (fakeQueryStore) LatestEventAt(context.Context, uuid.UUID, uuid.UUID) (*tim
 
 func testRouter(events *fakeEventStore) http.Handler {
 	cfg := config.Config{IngestToken: "ingest-token", QueryToken: "query-token", MaximumBatchSize: 5, MaximumRequestBodyBytes: 2048}
-	return NewRouter(RouterDependencies{Config: cfg, Events: events, Analytics: query.NewService(fakeQueryStore{}), Ping: func(context.Context) error { return nil }})
+	return NewRouter(RouterDependencies{Config: cfg, Events: events, Analytics: query.NewService(fakeQueryStore{}), Purger: events, Ping: func(context.Context) error { return nil }})
+}
+
+func TestPurgeRequiresBearerTokenAndDeletesStreamAnalytics(t *testing.T) {
+	events := &fakeEventStore{}
+	router := testRouter(events)
+	organizationID := uuid.New()
+	streamID := uuid.New()
+	path := "/internal/v1/organizations/" + organizationID.String() + "/streams/" + streamID.String()
+
+	request := httptest.NewRequest(http.MethodDelete, path, nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized, got %d", response.Code)
+	}
+
+	request = httptest.NewRequest(http.MethodDelete, path, nil)
+	request.Header.Set("Authorization", "Bearer query-token")
+	response = httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("expected no content, got %d", response.Code)
+	}
+	if events.purgedOrganizationID != organizationID || events.purgedStreamID != streamID {
+		t.Fatalf("unexpected purge target: organization=%s stream=%s", events.purgedOrganizationID, events.purgedStreamID)
+	}
 }
 
 func TestIngestRequiresBearerTokenAndAcceptsBatch(t *testing.T) {

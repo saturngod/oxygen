@@ -516,6 +516,7 @@ test('enabling does not reset a stream that is already active', function () {
 
 test('admin can delete a live stream with its sessions and viewer rollups', function () {
     [$user, $organization] = liveStreamAdmin();
+    config(['services.analytics.url' => null]);
     $liveStream = LiveStream::factory()
         ->for($organization)
         ->live()
@@ -530,6 +531,10 @@ test('admin can delete a live stream with its sessions and viewer rollups', func
         'live_stream_id' => $liveStream->id,
         'live_stream_session_id' => $session->id,
         'minute' => now()->startOfMinute(),
+    ]);
+    LiveStreamViewerHourlyRollup::factory()->for($liveStream)->create([
+        'organization_id' => $organization->id,
+        'bucket_start' => now()->startOfHour(),
     ]);
 
     config([
@@ -547,11 +552,33 @@ test('admin can delete a live stream with its sessions and viewer rollups', func
 
     expect(LiveStream::query()->count())->toBe(0)
         ->and(LiveStreamSession::query()->count())->toBe(0)
-        ->and(LiveStreamViewerRollup::query()->count())->toBe(0);
+        ->and(LiveStreamViewerRollup::query()->count())->toBe(0)
+        ->and(LiveStreamViewerHourlyRollup::query()->count())->toBe(0);
 
     Http::assertSentCount(1);
     Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
         && $request->url() === 'http://live-service.test/streams/'.$liveStream->public_id.'/restart');
+});
+
+test('remote analytics must be purged before a live stream is deleted', function () {
+    [$user, $organization] = liveStreamAdmin();
+    $liveStream = LiveStream::factory()->for($organization)->create();
+
+    config([
+        'services.analytics.url' => 'http://analytics.test',
+        'services.analytics.query_token' => 'private-query-token',
+    ]);
+    Http::fake([
+        'http://analytics.test/*' => Http::response(['error' => 'down'], 503),
+    ]);
+
+    $this->actingAs($user)
+        ->delete(route('admin.organizations.live-streams.destroy', [$organization, $liveStream]))
+        ->assertRedirect(route('admin.organizations.live-streams.show', [$organization, $liveStream]));
+
+    expect($liveStream->fresh())->not->toBeNull();
+
+    Http::assertSentCount(3);
 });
 
 test('deleting a live stream from another organization is not found', function () {
